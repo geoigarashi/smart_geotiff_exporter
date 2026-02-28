@@ -326,6 +326,47 @@ class SmartGeoTIFFDialog(QDialog):
             1, QHeaderView.Stretch
         )
         layout_palette.addWidget(self.table_palette)
+
+        # Botões de edição da tabela
+        layout_table_btns = QHBoxLayout()
+
+        btn_add_row = QPushButton("＋  Adicionar Classe")
+        btn_add_row.setToolTip(
+            "Insere uma nova linha em branco ao final da tabela para adicionar "
+            "uma classe personalizada."
+        )
+        btn_add_row.setStyleSheet(
+            "background-color: #1565C0; color: white; font-weight: bold;"
+        )
+        btn_add_row.clicked.connect(self._add_table_row)
+
+        btn_remove_row = QPushButton("－  Remover Classe Selecionada")
+        btn_remove_row.setToolTip(
+            "Remove a(s) linha(s) selecionada(s) da tabela. "
+            "Selecione uma ou mais linhas antes de clicar."
+        )
+        btn_remove_row.setStyleSheet(
+            "background-color: #B71C1C; color: white; font-weight: bold;"
+        )
+        btn_remove_row.clicked.connect(self._remove_table_rows)
+
+        btn_reset_table = QPushButton("↺  Restaurar Tema")
+        btn_reset_table.setToolTip(
+            "Desfaz todas as edições e restaura as classes padrão do tema selecionado."
+        )
+        btn_reset_table.setStyleSheet(
+            "background-color: #E65100; color: white; font-weight: bold;"
+        )
+        btn_reset_table.clicked.connect(
+            lambda: self._populate_table(self.combo_palette.currentText())
+        )
+
+        layout_table_btns.addWidget(btn_add_row)
+        layout_table_btns.addWidget(btn_remove_row)
+        layout_table_btns.addStretch()
+        layout_table_btns.addWidget(btn_reset_table)
+        layout_palette.addLayout(layout_table_btns)
+
         group_palette.setLayout(layout_palette)
         main_layout.addWidget(group_palette)
 
@@ -422,6 +463,56 @@ class SmartGeoTIFFDialog(QDialog):
             except Exception:
                 pass
             self.table_palette.setItem(row, 2, item_hex)
+
+    def _add_table_row(self):
+        """Insere uma nova linha editável ao final da tabela."""
+        row = self.table_palette.rowCount()
+        self.table_palette.insertRow(row)
+
+        # Valor padrão: próximo inteiro disponível
+        existing_vals = set()
+        for r in range(row):
+            try:
+                existing_vals.add(int(self.table_palette.item(r, 0).text()))
+            except Exception:
+                pass
+        next_val = max(existing_vals) + 1 if existing_vals else 1
+
+        item_val = QTableWidgetItem(str(next_val))
+        self.table_palette.setItem(row, 0, item_val)
+        self.table_palette.setItem(row, 1, QTableWidgetItem("Nova Classe"))
+
+        item_hex = QTableWidgetItem("#FFFFFF")
+        item_hex.setBackground(QColor("#FFFFFF"))
+        item_hex.setForeground(QColor("#000000"))
+        self.table_palette.setItem(row, 2, item_hex)
+
+        # Entra em modo de edição no campo Nome imediatamente
+        self.table_palette.setCurrentCell(row, 1)
+        self.table_palette.editItem(self.table_palette.item(row, 1))
+
+    def _remove_table_rows(self):
+        """Remove as linhas selecionadas na tabela."""
+        selected_rows = sorted(
+            set(idx.row() for idx in self.table_palette.selectedIndexes()),
+            reverse=True  # Remove de baixo para cima para não deslocar índices
+        )
+        if not selected_rows:
+            QMessageBox.information(
+                self, "Aviso",
+                "Selecione ao menos uma linha na tabela para remover."
+            )
+            return
+
+        confirm = QMessageBox.question(
+            self, "Confirmar Remoção",
+            f"Remover {len(selected_rows)} classe(s) selecionada(s)?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm == QMessageBox.Yes:
+            for row in selected_rows:
+                self.table_palette.removeRow(row)
 
     def _get_palette_from_table(self):
         custom_palette = {}
