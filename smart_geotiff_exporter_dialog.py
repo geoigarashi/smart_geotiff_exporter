@@ -228,7 +228,7 @@ class SmartGeoTIFFDialog(QDialog):
         self.iface  = iface
         self.worker = None
 
-        self.setWindowTitle("Smart GeoTIFF Exporter v1.0.0")
+        self.setWindowTitle("Smart GeoTIFF Exporter")
         self.setMinimumSize(820, 780)
         # Mantém a janela sempre visível mesmo ao clicar fora
         self.setWindowFlags(self.windowFlags() | Qt.Window)
@@ -392,9 +392,23 @@ class SmartGeoTIFFDialog(QDialog):
         self.log_viewer.setMinimumHeight(150)
         main_layout.addWidget(self.log_viewer)
 
+        # Ler versão do metadata.txt dinamicamente
+        version = "1.0.0"  # fallback
+        try:
+            import configparser
+            plugin_dir = os.path.dirname(__file__)
+            metadata_path = os.path.join(plugin_dir, "metadata.txt")
+            if os.path.exists(metadata_path):
+                config = configparser.ConfigParser()
+                config.read(metadata_path, encoding='utf-8')
+                if config.has_option('general', 'version'):
+                    version = config.get('general', 'version')
+        except Exception:
+            pass
+
         # Rodapé
         lbl_footer = QLabel(
-            "Smart GeoTIFF Exporter v1.0.0  |  Clayton Igarashi "
+            f"Smart GeoTIFF Exporter v{version}  |  Clayton Igarashi "
             "<geoigarashi@gmail.com>"
         )
         lbl_footer.setAlignment(Qt.AlignCenter)
