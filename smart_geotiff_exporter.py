@@ -40,15 +40,12 @@ class SmartGeoTIFFExporter:
         )
         self.action.triggered.connect(self.run)
 
-        # Adiciona ao menu Raster do QGIS
-        self.iface.addPluginToRasterMenu("Smart GeoTIFF Exporter", self.action)
-
-        # Adiciona botão na toolbar de plugins
+        self.iface.addPluginToMenu("Ferramentas Geo", self.action)
         self.iface.addToolBarIcon(self.action)
 
     def unload(self):
         """Remove o plugin do menu e da toolbar ao desativar."""
-        self.iface.removePluginRasterMenu("Smart GeoTIFF Exporter", self.action)
+        self.iface.removePluginMenu("Ferramentas Geo", self.action)
         self.iface.removeToolBarIcon(self.action)
 
     def run(self):
