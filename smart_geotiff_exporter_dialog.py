@@ -4,15 +4,16 @@ Smart GeoTIFF Exporter - Diálogo Principal
 Interface gráfica e worker GDAL adaptados para rodar dentro do QGIS.
 
 Autor: Clayton Igarashi <geoigarashi@gmail.com>
-Versão: 1.0.0
+Versão: 1.1.0
 """
 
+import json
 import os
 import time
+import xml.etree.ElementTree as ET
 
 from qgis.PyQt.QtWidgets import (
     QDialog,
-    QWidget,
     QVBoxLayout,
     QHBoxLayout,
     QPushButton,
@@ -61,16 +62,16 @@ PALETAS = {
         8: {"hex": "#4A148C", "name": ">=100% (APP Legal)"},
     },
     "Uso do Solo": {
-        0:   {"hex": "#CCCCCC", "name": "Sem classe (NoData/fora do raster)"},
-        1:   {"hex": "#c27ba0", "name": "Lavoura Anual"},
-        2:   {"hex": "#9932cc", "name": "Lavoura Perene"},
-        3:   {"hex": "#edde8e", "name": "Pastagem Cultivada"},
-        4:   {"hex": "#d6bc74", "name": "Pastagem Nativa"},
-        5:   {"hex": "#d4271e", "name": "Pastagem Degradada"},
-        6:   {"hex": "#7a5900", "name": "Silvicultura (Comercial)"},
-        8:   {"hex": "#1f8d49", "name": "Área de preservação (RL,APP)"},
-        9:   {"hex": "#2532e4", "name": "Lagos, lagoas"},
-        10:  {"hex": "#5e5e5e", "name": "Construções e Benfeitorias (+ servidão)"},
+        0: {"hex": "#CCCCCC", "name": "Sem classe (NoData/fora do raster)"},
+        1: {"hex": "#c27ba0", "name": "Lavoura Anual"},
+        2: {"hex": "#9932cc", "name": "Lavoura Perene"},
+        3: {"hex": "#edde8e", "name": "Pastagem Cultivada"},
+        4: {"hex": "#d6bc74", "name": "Pastagem Nativa"},
+        5: {"hex": "#d4271e", "name": "Pastagem Degradada"},
+        6: {"hex": "#7a5900", "name": "Silvicultura (Comercial)"},
+        8: {"hex": "#1f8d49", "name": "Área de preservação (RL,APP)"},
+        9: {"hex": "#2532e4", "name": "Lagos, lagoas"},
+        10: {"hex": "#5e5e5e", "name": "Construções e Benfeitorias (+ servidão)"},
         100: {"hex": "#000000", "name": "Uso Agropecuário não Definido"},
     },
 }
@@ -81,15 +82,15 @@ PALETAS = {
 # ---------------------------------------------------------------------------
 class GdalWorker(QThread):
     progress = pyqtSignal(int)
-    log      = pyqtSignal(str)
+    log = pyqtSignal(str)
     finished = pyqtSignal(bool, str)
 
     def __init__(self, input_path, output_path, epsg, threads, custom_palette):
         super().__init__()
-        self.input_path    = input_path
-        self.output_path   = output_path
-        self.epsg          = epsg
-        self.threads       = threads
+        self.input_path = input_path
+        self.output_path = output_path
+        self.epsg = epsg
+        self.threads = threads
         self.custom_palette = custom_palette
 
     def gdal_progress_callback(self, complete, message, user_data):
@@ -137,8 +138,7 @@ class GdalWorker(QThread):
 
             gdal.SetConfigOption("COMPRESS_OVERVIEW", "ZSTD")
             ds.BuildOverviews(
-                "NEAREST", [2, 4, 8, 16, 32, 64],
-                callback=self.gdal_progress_callback
+                "NEAREST", [2, 4, 8, 16, 32, 64], callback=self.gdal_progress_callback
             )
 
             ds = None
@@ -150,21 +150,21 @@ class GdalWorker(QThread):
 
             color_table = gdal.ColorTable()
             rat = gdal.RasterAttributeTable()
-            rat.CreateColumn("Value",      gdal.GFT_Integer, gdal.GFU_MinMax)
-            rat.CreateColumn("Class_Name", gdal.GFT_String,  gdal.GFU_Name)
+            rat.CreateColumn("Value", gdal.GFT_Integer, gdal.GFU_MinMax)
+            rat.CreateColumn("Class_Name", gdal.GFT_String, gdal.GFU_Name)
             rat.SetRowCount(len(self.custom_palette))
 
             for i in range(256):
                 if i in self.custom_palette:
                     info = self.custom_palette[i]
                     h = info["hex"].lstrip("#")
-                    rgb = tuple(int(h[j:j+2], 16) for j in (0, 2, 4)) + (255,)
+                    rgb = tuple(int(h[j : j + 2], 16) for j in (0, 2, 4)) + (255,)
                     color_table.SetColorEntry(i, rgb)
                 else:
                     color_table.SetColorEntry(i, (0, 0, 0, 0))
 
             for row_idx, (val, info) in enumerate(self.custom_palette.items()):
-                rat.SetValueAsInt(row_idx,    0, val)
+                rat.SetValueAsInt(row_idx, 0, val)
                 rat.SetValueAsString(row_idx, 1, info["name"])
 
             band.SetColorTable(color_table)
@@ -225,7 +225,7 @@ class SmartGeoTIFFDialog(QDialog):
 
     def __init__(self, iface=None, parent=None):
         super().__init__(parent)
-        self.iface  = iface
+        self.iface = iface
         self.worker = None
 
         self.setWindowTitle("Smart GeoTIFF Exporter")
@@ -241,10 +241,10 @@ class SmartGeoTIFFDialog(QDialog):
         main_layout = QVBoxLayout(self)
 
         # ── 1. Arquivos ────────────────────────────────────────────────
-        group_files   = QGroupBox("Arquivos e Diretórios")
-        layout_files  = QVBoxLayout()
+        group_files = QGroupBox("Arquivos e Diretórios")
+        layout_files = QVBoxLayout()
 
-        layout_input  = QHBoxLayout()
+        layout_input = QHBoxLayout()
         self.line_input = QLineEdit()
         self.line_input.setPlaceholderText(
             "Selecione o arquivo de origem (.vrt, .sdat, .tif, .img)..."
@@ -278,7 +278,7 @@ class SmartGeoTIFFDialog(QDialog):
         main_layout.addWidget(group_files)
 
         # ── 2. Parâmetros GDAL ─────────────────────────────────────────
-        group_settings  = QGroupBox("Parâmetros GDAL")
+        group_settings = QGroupBox("Parâmetros GDAL")
         layout_settings = QHBoxLayout()
 
         layout_settings.addWidget(QLabel("EPSG de Saída:"))
@@ -306,7 +306,7 @@ class SmartGeoTIFFDialog(QDialog):
         main_layout.addWidget(group_settings)
 
         # ── 3. Paleta e RAT ───────────────────────────────────────────
-        group_palette  = QGroupBox("Metadados, Classes e Cores (RAT)")
+        group_palette = QGroupBox("Metadados, Classes e Cores (RAT)")
         layout_palette = QVBoxLayout()
 
         layout_combo_palette = QHBoxLayout()
@@ -361,14 +361,30 @@ class SmartGeoTIFFDialog(QDialog):
             lambda: self._populate_table(self.combo_palette.currentText())
         )
 
+        btn_save_palette = QPushButton("💾  Salvar Lista...")
+        btn_save_palette.setToolTip(
+            "Salva as classes atuais da tabela em um arquivo JSON para reutilização futura."
+        )
+        btn_save_palette.clicked.connect(self._save_palette)
+
+        btn_load_palette = QPushButton("📂  Carregar Lista...")
+        btn_load_palette.setToolTip(
+            "Carrega classes a partir de um arquivo JSON (salvo anteriormente) "
+            "ou de um arquivo QML do QGIS (.qml com renderer paletted)."
+        )
+        btn_load_palette.clicked.connect(self._load_palette)
+
         layout_table_btns.addWidget(btn_add_row)
         layout_table_btns.addWidget(btn_remove_row)
         layout_table_btns.addStretch()
         layout_table_btns.addWidget(btn_reset_table)
+        layout_table_btns.addSpacing(16)
+        layout_table_btns.addWidget(btn_save_palette)
+        layout_table_btns.addWidget(btn_load_palette)
         layout_palette.addLayout(layout_table_btns)
 
         group_palette.setLayout(layout_palette)
-        main_layout.addWidget(group_palette)
+        main_layout.addWidget(group_palette, 1)
 
         # ── 4. Ações ──────────────────────────────────────────────────
         self.btn_process = QPushButton("INICIAR PROCESSAMENTO ZSTD")
@@ -389,20 +405,21 @@ class SmartGeoTIFFDialog(QDialog):
         self.log_viewer.setStyleSheet(
             "background-color: #1e1e1e; color: #00ff00; font-family: Consolas;"
         )
-        self.log_viewer.setMinimumHeight(150)
+        self.log_viewer.setFixedHeight(150)
         main_layout.addWidget(self.log_viewer)
 
         # Ler versão do metadata.txt dinamicamente
         version = "1.0.0"  # fallback
         try:
             import configparser
+
             plugin_dir = os.path.dirname(__file__)
             metadata_path = os.path.join(plugin_dir, "metadata.txt")
             if os.path.exists(metadata_path):
                 config = configparser.ConfigParser()
-                config.read(metadata_path, encoding='utf-8')
-                if config.has_option('general', 'version'):
-                    version = config.get('general', 'version')
+                config.read(metadata_path, encoding="utf-8")
+                if config.has_option("general", "version"):
+                    version = config.get("general", "version")
         except Exception:
             pass
 
@@ -416,14 +433,18 @@ class SmartGeoTIFFDialog(QDialog):
         main_layout.addWidget(lbl_footer)
 
         self._populate_table(self.combo_palette.currentText())
+        self._editing = False
+        self.table_palette.itemChanged.connect(self._on_item_changed)
 
     # ------------------------------------------------------------------
     # Slots de Interface
     # ------------------------------------------------------------------
     def _select_input(self):
         file, _ = QFileDialog.getOpenFileName(
-            self, "Selecionar Origem", "",
-            "Rasters (*.vrt *.sdat *.tif *.img);;Todos (*.*)"
+            self,
+            "Selecionar Origem",
+            "",
+            "Rasters (*.vrt *.sdat *.tif *.img);;Todos (*.*)",
         )
         if file:
             self.line_input.setText(os.path.normpath(file))
@@ -455,13 +476,18 @@ class SmartGeoTIFFDialog(QDialog):
         self._append_log(f"Camada ativa carregada: {source}")
 
     def _populate_table(self, theme_name):
-        self.table_palette.setRowCount(0)
         theme_data = PALETAS.get(theme_name, {})
-        for row, (val, info) in enumerate(theme_data.items()):
+        self._populate_table_from_dict(theme_data)
+
+    def _populate_table_from_dict(self, classes_dict):
+        """Popula a tabela RAT a partir de um dict {int_val: {'name': str, 'hex': str}}."""
+        self.table_palette.blockSignals(True)
+        self.table_palette.setRowCount(0)
+        for row, (val, info) in enumerate(classes_dict.items()):
             self.table_palette.insertRow(row)
 
             item_val = QTableWidgetItem(str(val))
-            item_val.setFlags(item_val.flags() ^ Qt.ItemIsEditable)
+            item_val.setData(Qt.UserRole, int(val))
             self.table_palette.setItem(row, 0, item_val)
 
             self.table_palette.setItem(row, 1, QTableWidgetItem(info["name"]))
@@ -477,6 +503,7 @@ class SmartGeoTIFFDialog(QDialog):
             except Exception:
                 pass
             self.table_palette.setItem(row, 2, item_hex)
+        self.table_palette.blockSignals(False)
 
     def _add_table_row(self):
         """Insere uma nova linha editável ao final da tabela."""
@@ -493,6 +520,7 @@ class SmartGeoTIFFDialog(QDialog):
         next_val = max(existing_vals) + 1 if existing_vals else 1
 
         item_val = QTableWidgetItem(str(next_val))
+        item_val.setData(Qt.UserRole, next_val)
         self.table_palette.setItem(row, 0, item_val)
         self.table_palette.setItem(row, 1, QTableWidgetItem("Nova Classe"))
 
@@ -509,17 +537,17 @@ class SmartGeoTIFFDialog(QDialog):
         """Remove as linhas selecionadas na tabela."""
         selected_rows = sorted(
             set(idx.row() for idx in self.table_palette.selectedIndexes()),
-            reverse=True  # Remove de baixo para cima para não deslocar índices
+            reverse=True,  # Remove de baixo para cima para não deslocar índices
         )
         if not selected_rows:
             QMessageBox.information(
-                self, "Aviso",
-                "Selecione ao menos uma linha na tabela para remover."
+                self, "Aviso", "Selecione ao menos uma linha na tabela para remover."
             )
             return
 
         confirm = QMessageBox.question(
-            self, "Confirmar Remoção",
+            self,
+            "Confirmar Remoção",
             f"Remover {len(selected_rows)} classe(s) selecionada(s)?",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
@@ -528,12 +556,134 @@ class SmartGeoTIFFDialog(QDialog):
             for row in selected_rows:
                 self.table_palette.removeRow(row)
 
+    def _on_item_changed(self, item):
+        """Valida edição na coluna 'Valor (Pixel)': inteiro único, sem duplicata."""
+        if self._editing or item.column() != 0:
+            return
+        text = item.text().strip()
+        previous = item.data(Qt.UserRole)
+        # Validar inteiro >= 0
+        try:
+            new_val = int(text)
+            if new_val < 0:
+                raise ValueError
+        except ValueError:
+            self._editing = True
+            item.setText(str(previous))
+            self._editing = False
+            QMessageBox.warning(
+                self,
+                "Valor inválido",
+                f"'{text}' não é um inteiro válido (≥ 0). Valor revertido.",
+            )
+            return
+        # Verificar duplicata
+        for r in range(self.table_palette.rowCount()):
+            if r == item.row():
+                continue
+            other = self.table_palette.item(r, 0)
+            if other and other.text().strip() == str(new_val):
+                self._editing = True
+                item.setText(str(previous))
+                self._editing = False
+                QMessageBox.warning(
+                    self,
+                    "Valor duplicado",
+                    f"O valor {new_val} já existe na linha {r + 1}. Valor revertido.",
+                )
+                return
+        # Válido: atualiza referência anterior
+        item.setData(Qt.UserRole, new_val)
+
+    def _save_palette(self):
+        """Salva a paleta atual como arquivo JSON."""
+        try:
+            palette = self._get_palette_from_table()
+        except Exception as e:
+            QMessageBox.critical(self, "Erro ao ler tabela", str(e))
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Salvar lista de classes", "", "Lista JSON (*.json)"
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".json"):
+            path += ".json"
+        name = os.path.splitext(os.path.basename(path))[0]
+        data = {
+            "name": name,
+            "classes": {str(k): v for k, v in palette.items()},
+        }
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            QMessageBox.information(
+                self, "Lista salva", f"{len(palette)} classe(s) salvas em:\n{path}"
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Erro ao salvar", str(e))
+
+    def _load_palette(self):
+        """Carrega paleta a partir de arquivo JSON ou QML."""
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Carregar lista de classes",
+            "",
+            "Listas (*.json *.qml);;JSON (*.json);;QML QGIS (*.qml)",
+        )
+        if not path:
+            return
+        ext = os.path.splitext(path)[1].lower()
+        try:
+            if ext == ".json":
+                classes = self._load_from_json(path)
+            elif ext == ".qml":
+                classes = self._load_from_qml(path)
+            else:
+                QMessageBox.warning(
+                    self, "Formato não suportado", f"Extensão '{ext}' não reconhecida."
+                )
+                return
+        except Exception as e:
+            QMessageBox.critical(self, "Erro ao carregar", str(e))
+            return
+        if not classes:
+            QMessageBox.warning(
+                self, "Arquivo vazio", "Nenhuma classe encontrada no arquivo."
+            )
+            return
+        self._populate_table_from_dict(classes)
+        QMessageBox.information(
+            self,
+            "Lista carregada",
+            f"{len(classes)} classe(s) carregadas de:\n{os.path.basename(path)}",
+        )
+
+    def _load_from_json(self, path):
+        """Retorna dict {int_val: {'name': str, 'hex': str}} a partir de JSON."""
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        if "classes" not in data:
+            raise ValueError("Chave 'classes' não encontrada no JSON.")
+        return {int(k): v for k, v in data["classes"].items()}
+
+    def _load_from_qml(self, path):
+        """Retorna dict {int_val: {'name': str, 'hex': str}} a partir de QML QGIS."""
+        tree = ET.parse(path)
+        classes = {}
+        for entry in tree.findall(".//paletteEntry"):
+            val = int(entry.get("value", 0))
+            color = entry.get("color", "#CCCCCC")
+            label = entry.get("label", f"Classe {val}")
+            classes[val] = {"name": label, "hex": color}
+        return classes
+
     def _get_palette_from_table(self):
         custom_palette = {}
         for row in range(self.table_palette.rowCount()):
             try:
-                val      = int(self.table_palette.item(row, 0).text())
-                name     = self.table_palette.item(row, 1).text()
+                val = int(self.table_palette.item(row, 0).text())
+                name = self.table_palette.item(row, 1).text()
                 hex_color = self.table_palette.item(row, 2).text()
                 if not hex_color.startswith("#") or len(hex_color) != 7:
                     raise ValueError(f"Cor HEX inválida na linha {row + 1}")
@@ -552,13 +702,12 @@ class SmartGeoTIFFDialog(QDialog):
     # Processamento
     # ------------------------------------------------------------------
     def _start_processing(self):
-        input_file  = self.line_input.text().strip()
+        input_file = self.line_input.text().strip()
         output_file = self.line_output.text().strip()
 
         if not input_file or not output_file:
             QMessageBox.warning(
-                self, "Aviso",
-                "Por favor, defina os arquivos de origem e destino."
+                self, "Aviso", "Por favor, defina os arquivos de origem e destino."
             )
             return
 
@@ -593,7 +742,7 @@ class SmartGeoTIFFDialog(QDialog):
             # Carrega automaticamente o resultado no projeto QGIS
             if self.chk_load.isChecked() and self.iface is not None:
                 output_file = self.line_output.text().strip()
-                layer_name  = os.path.splitext(os.path.basename(output_file))[0]
+                layer_name = os.path.splitext(os.path.basename(output_file))[0]
                 self.iface.addRasterLayer(output_file, layer_name)
                 self._append_log(
                     f"-> Camada '{layer_name}' carregada automaticamente no projeto."

@@ -2,10 +2,10 @@
 name=Smart GeoTIFF Exporter
 qgisMinimumVersion=3.16
 description=Exporta rasters com compressão ZSTD, pirâmides, paleta de classes corporativas (Aptidão, Declividade, Uso do Solo) e geração de QML.
-version=1.0.0
+version=1.1.0
 author=Clayton Igarashi
 email=geoigarashi@gmail.com
-about=Plugin para exportação corporativa de rasters GeoTIFF com compressão ZSTD tileada, geração automática de overviews (pirâmides), injeção de Raster Attribute Table (RAT), paleta de cores corporativa e geração de arquivo de estilo .qml pronto para uso no QGIS. Suporta temas de Aptidão, Declividade e Uso do Solo.
+about=Plugin para exportação corporativa de rasters GeoTIFF com compressão ZSTD tileada, geração automática de overviews (pirâmides), injeção de Raster Attribute Table (RAT), paleta de cores corporativa e geração de arquivo de estilo .qml pronto para uso no QGIS. Suporta temas de Aptidão, Declividade e Uso do Solo. v1.1.0: coluna Valor (Pixel) editável com validação de duplicatas, salvar/carregar listas de classes em JSON, importação de paleta a partir de arquivo QML do QGIS, e correção de layout (área RAT expande com a janela, log com altura fixa).
 tracker=
 repository=https://github.com/geoigarashi/smart_geotiff_exporter.git
 tags=raster,geotiff,gdal,zstd,export,compressão,pirâmides,RAT,qml,aptidão,declividade,uso do solo

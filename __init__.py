@@ -11,4 +11,5 @@ def classFactory(iface):
     :param iface: Interface QGIS (QgisInterface)
     """
     from .smart_geotiff_exporter import SmartGeoTIFFExporter
+
     return SmartGeoTIFFExporter(iface)
