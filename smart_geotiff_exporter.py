@@ -29,11 +29,7 @@ class SmartGeoTIFFExporter:
         icon_path = os.path.join(self.plugin_dir, "icon.png")
         icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
 
-        self.action = QAction(
-            icon,
-            "Smart GeoTIFF Exporter",
-            self.iface.mainWindow()
-        )
+        self.action = QAction(icon, "Smart GeoTIFF Exporter", self.iface.mainWindow())
         self.action.setToolTip(
             "Exporta rasters para GeoTIFF otimizado com ZSTD, pirâmides, "
             "paleta corporativa e QML automático."
@@ -58,8 +54,7 @@ class SmartGeoTIFFExporter:
         # Reutiliza a instância do diálogo se já existir
         if self.dialog is None:
             self.dialog = SmartGeoTIFFDialog(
-                iface=self.iface,
-                parent=self.iface.mainWindow()
+                iface=self.iface, parent=self.iface.mainWindow()
             )
 
         self.dialog.show()
