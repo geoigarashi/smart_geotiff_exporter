@@ -40,7 +40,9 @@ Ele encapsula em uma única interface dentro do QGIS todo o pipeline que antes e
 ## Funcionalidades
 
 - Temas corporativos pré-definidos: **Aptidão**, **Declividade** e **Uso do Solo**
-- **Tabela de classes editável**: adicione, remova ou edite linhas para criar paletas personalizadas
+- **Tabela de classes totalmente editável**: adicione, remova e edite qualquer célula — incluindo a coluna **Valor (Pixel)** — com validação automática de duplicatas
+- **Salvar/Carregar listas de classes** em `.json` para reutilização em projetos futuros
+- **Importação de paleta a partir de `.qml`** do QGIS — reaproveite estilos já criados no projeto diretamente na tabela RAT
 - **Botão "Usar camada ativa"**: importa o caminho da camada selecionada no projeto sem navegar pelo sistema de arquivos
 - **Checkbox de carregamento automático**: ao finalizar, a camada exportada entra direto no mapa com estilo aplicado
 - Suporte a múltiplos sistemas de referência: EPSG:4326, 4674, 31982, 31983, 31984
@@ -130,9 +132,13 @@ Se a opção **"Carregar resultado no projeto"** estiver marcada, a camada é ca
 
 É possível editar a tabela de classes livremente antes de processar:
 
-- **Editar** nome ou cor HEX diretamente na célula
+- **Editar** qualquer célula — incluindo a coluna **Valor (Pixel)** — diretamente na tabela; valores inválidos ou duplicados são rejeitados com aviso e revertidos automaticamente
 - **Adicionar linha** para inserir uma nova classe personalizada
 - **Remover linha** para excluir uma classe que não existe no raster
+- **💾 Salvar Lista...** — exporta as classes atuais para um arquivo `.json` reutilizável em processamentos futuros
+- **📂 Carregar Lista...** — importa classes a partir de:
+  - `.json` salvo anteriormente pelo plugin
+  - `.qml` do QGIS (renderer *paletted*) — ideal para reaproveitar estilos já existentes no projeto
 
 Isso permite usar o plugin com qualquer raster classificado, sem se limitar aos temas pré-definidos.
 
