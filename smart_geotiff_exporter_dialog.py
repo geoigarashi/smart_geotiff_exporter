@@ -4,11 +4,13 @@ Smart GeoTIFF Exporter - Diálogo Principal
 Interface gráfica e worker GDAL adaptados para rodar dentro do QGIS.
 
 Autor: Clayton Igarashi <geoigarashi@gmail.com>
-Versão: 1.0.0
+Versão: 1.1.0
 """
 
+import json
 import os
 import time
+import xml.etree.ElementTree as ET
 
 from qgis.PyQt.QtWidgets import (
     QDialog,
@@ -361,14 +363,30 @@ class SmartGeoTIFFDialog(QDialog):
             lambda: self._populate_table(self.combo_palette.currentText())
         )
 
+        btn_save_palette = QPushButton("💾  Salvar Lista...")
+        btn_save_palette.setToolTip(
+            "Salva as classes atuais da tabela em um arquivo JSON para reutilização futura."
+        )
+        btn_save_palette.clicked.connect(self._save_palette)
+
+        btn_load_palette = QPushButton("📂  Carregar Lista...")
+        btn_load_palette.setToolTip(
+            "Carrega classes a partir de um arquivo JSON (salvo anteriormente) "
+            "ou de um arquivo QML do QGIS (.qml com renderer paletted)."
+        )
+        btn_load_palette.clicked.connect(self._load_palette)
+
         layout_table_btns.addWidget(btn_add_row)
         layout_table_btns.addWidget(btn_remove_row)
         layout_table_btns.addStretch()
         layout_table_btns.addWidget(btn_reset_table)
+        layout_table_btns.addSpacing(16)
+        layout_table_btns.addWidget(btn_save_palette)
+        layout_table_btns.addWidget(btn_load_palette)
         layout_palette.addLayout(layout_table_btns)
 
         group_palette.setLayout(layout_palette)
-        main_layout.addWidget(group_palette)
+        main_layout.addWidget(group_palette, 1)
 
         # ── 4. Ações ──────────────────────────────────────────────────
         self.btn_process = QPushButton("INICIAR PROCESSAMENTO ZSTD")
@@ -389,7 +407,7 @@ class SmartGeoTIFFDialog(QDialog):
         self.log_viewer.setStyleSheet(
             "background-color: #1e1e1e; color: #00ff00; font-family: Consolas;"
         )
-        self.log_viewer.setMinimumHeight(150)
+        self.log_viewer.setFixedHeight(150)
         main_layout.addWidget(self.log_viewer)
 
         # Ler versão do metadata.txt dinamicamente
@@ -416,6 +434,8 @@ class SmartGeoTIFFDialog(QDialog):
         main_layout.addWidget(lbl_footer)
 
         self._populate_table(self.combo_palette.currentText())
+        self._editing = False
+        self.table_palette.itemChanged.connect(self._on_item_changed)
 
     # ------------------------------------------------------------------
     # Slots de Interface
@@ -455,13 +475,18 @@ class SmartGeoTIFFDialog(QDialog):
         self._append_log(f"Camada ativa carregada: {source}")
 
     def _populate_table(self, theme_name):
-        self.table_palette.setRowCount(0)
         theme_data = PALETAS.get(theme_name, {})
-        for row, (val, info) in enumerate(theme_data.items()):
+        self._populate_table_from_dict(theme_data)
+
+    def _populate_table_from_dict(self, classes_dict):
+        """Popula a tabela RAT a partir de um dict {int_val: {'name': str, 'hex': str}}."""
+        self.table_palette.blockSignals(True)
+        self.table_palette.setRowCount(0)
+        for row, (val, info) in enumerate(classes_dict.items()):
             self.table_palette.insertRow(row)
 
             item_val = QTableWidgetItem(str(val))
-            item_val.setFlags(item_val.flags() ^ Qt.ItemIsEditable)
+            item_val.setData(Qt.UserRole, int(val))
             self.table_palette.setItem(row, 0, item_val)
 
             self.table_palette.setItem(row, 1, QTableWidgetItem(info["name"]))
@@ -477,6 +502,7 @@ class SmartGeoTIFFDialog(QDialog):
             except Exception:
                 pass
             self.table_palette.setItem(row, 2, item_hex)
+        self.table_palette.blockSignals(False)
 
     def _add_table_row(self):
         """Insere uma nova linha editável ao final da tabela."""
@@ -493,6 +519,7 @@ class SmartGeoTIFFDialog(QDialog):
         next_val = max(existing_vals) + 1 if existing_vals else 1
 
         item_val = QTableWidgetItem(str(next_val))
+        item_val.setData(Qt.UserRole, next_val)
         self.table_palette.setItem(row, 0, item_val)
         self.table_palette.setItem(row, 1, QTableWidgetItem("Nova Classe"))
 
@@ -527,6 +554,120 @@ class SmartGeoTIFFDialog(QDialog):
         if confirm == QMessageBox.Yes:
             for row in selected_rows:
                 self.table_palette.removeRow(row)
+
+    def _on_item_changed(self, item):
+        """Valida edição na coluna 'Valor (Pixel)': inteiro único, sem duplicata."""
+        if self._editing or item.column() != 0:
+            return
+        text = item.text().strip()
+        previous = item.data(Qt.UserRole)
+        # Validar inteiro >= 0
+        try:
+            new_val = int(text)
+            if new_val < 0:
+                raise ValueError
+        except ValueError:
+            self._editing = True
+            item.setText(str(previous))
+            self._editing = False
+            QMessageBox.warning(
+                self, "Valor inválido",
+                f"'{text}' não é um inteiro válido (≥ 0). Valor revertido."
+            )
+            return
+        # Verificar duplicata
+        for r in range(self.table_palette.rowCount()):
+            if r == item.row():
+                continue
+            other = self.table_palette.item(r, 0)
+            if other and other.text().strip() == str(new_val):
+                self._editing = True
+                item.setText(str(previous))
+                self._editing = False
+                QMessageBox.warning(
+                    self, "Valor duplicado",
+                    f"O valor {new_val} já existe na linha {r + 1}. Valor revertido."
+                )
+                return
+        # Válido: atualiza referência anterior
+        item.setData(Qt.UserRole, new_val)
+
+    def _save_palette(self):
+        """Salva a paleta atual como arquivo JSON."""
+        try:
+            palette = self._get_palette_from_table()
+        except Exception as e:
+            QMessageBox.critical(self, "Erro ao ler tabela", str(e))
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Salvar lista de classes", "", "Lista JSON (*.json)"
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".json"):
+            path += ".json"
+        name = os.path.splitext(os.path.basename(path))[0]
+        data = {
+            "name": name,
+            "classes": {str(k): v for k, v in palette.items()},
+        }
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            QMessageBox.information(
+                self, "Lista salva",
+                f"{len(palette)} classe(s) salvas em:\n{path}"
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Erro ao salvar", str(e))
+
+    def _load_palette(self):
+        """Carrega paleta a partir de arquivo JSON ou QML."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Carregar lista de classes", "",
+            "Listas (*.json *.qml);;JSON (*.json);;QML QGIS (*.qml)"
+        )
+        if not path:
+            return
+        ext = os.path.splitext(path)[1].lower()
+        try:
+            if ext == ".json":
+                classes = self._load_from_json(path)
+            elif ext == ".qml":
+                classes = self._load_from_qml(path)
+            else:
+                QMessageBox.warning(self, "Formato não suportado", f"Extensão '{ext}' não reconhecida.")
+                return
+        except Exception as e:
+            QMessageBox.critical(self, "Erro ao carregar", str(e))
+            return
+        if not classes:
+            QMessageBox.warning(self, "Arquivo vazio", "Nenhuma classe encontrada no arquivo.")
+            return
+        self._populate_table_from_dict(classes)
+        QMessageBox.information(
+            self, "Lista carregada",
+            f"{len(classes)} classe(s) carregadas de:\n{os.path.basename(path)}"
+        )
+
+    def _load_from_json(self, path):
+        """Retorna dict {int_val: {'name': str, 'hex': str}} a partir de JSON."""
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        if "classes" not in data:
+            raise ValueError("Chave 'classes' não encontrada no JSON.")
+        return {int(k): v for k, v in data["classes"].items()}
+
+    def _load_from_qml(self, path):
+        """Retorna dict {int_val: {'name': str, 'hex': str}} a partir de QML QGIS."""
+        tree = ET.parse(path)
+        classes = {}
+        for entry in tree.findall(".//paletteEntry"):
+            val = int(entry.get("value", 0))
+            color = entry.get("color", "#CCCCCC")
+            label = entry.get("label", f"Classe {val}")
+            classes[val] = {"name": label, "hex": color}
+        return classes
 
     def _get_palette_from_table(self):
         custom_palette = {}
