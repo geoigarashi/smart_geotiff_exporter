@@ -4,7 +4,7 @@ Smart GeoTIFF Exporter - Diálogo Principal
 Interface gráfica e worker GDAL adaptados para rodar dentro do QGIS.
 
 Autor: Clayton Igarashi <geoigarashi@gmail.com>
-Versão: 1.1.0
+Versão: 1.2.0
 """
 
 import json
@@ -85,13 +85,14 @@ class GdalWorker(QThread):
     log = pyqtSignal(str)
     finished = pyqtSignal(bool, str)
 
-    def __init__(self, input_path, output_path, epsg, threads, custom_palette):
+    def __init__(self, input_path, output_path, epsg, threads, custom_palette, nodata_value=None):
         super().__init__()
         self.input_path = input_path
         self.output_path = output_path
         self.epsg = epsg
         self.threads = threads
         self.custom_palette = custom_palette
+        self.nodata_value = nodata_value  # None = sem NoData
 
     def gdal_progress_callback(self, complete, message, user_data):
         self.progress.emit(int(complete * 100))
@@ -146,7 +147,11 @@ class GdalWorker(QThread):
 
             ds_update = gdal.Open(self.output_path, gdal.GA_Update)
             band = ds_update.GetRasterBand(1)
-            band.SetNoDataValue(0)
+            if self.nodata_value is not None:
+                band.SetNoDataValue(self.nodata_value)
+                self.log.emit(f"-> NoData definido como: {self.nodata_value}")
+            else:
+                self.log.emit("-> NoData não definido (todos os valores são válidos).")
 
             color_table = gdal.ColorTable()
             rat = gdal.RasterAttributeTable()
@@ -175,7 +180,7 @@ class GdalWorker(QThread):
             qml_path = os.path.splitext(self.output_path)[0] + ".qml"
             palette_entries = ""
             for val, info in self.custom_palette.items():
-                alpha = 0 if val == 0 else 255
+                alpha = 0 if (self.nodata_value is not None and val == self.nodata_value) else 255
                 label = (
                     info["name"]
                     .replace("<", "&lt;")
@@ -300,6 +305,25 @@ class SmartGeoTIFFDialog(QDialog):
         self.chk_load = QCheckBox("Carregar resultado no projeto ao finalizar")
         self.chk_load.setChecked(True)
         layout_settings.addWidget(self.chk_load)
+
+        layout_settings.addSpacing(20)
+
+        # Controle de NoData configurável
+        self.chk_nodata = QCheckBox("Definir NoData:")
+        self.chk_nodata.setChecked(True)
+        self.chk_nodata.setToolTip(
+            "Quando marcado, o valor especificado será tratado como NoData (transparente).\n"
+            "Desmarque para rasters onde todos os valores de pixel são válidos (ex: PRODES)."
+        )
+        layout_settings.addWidget(self.chk_nodata)
+
+        self.spin_nodata = QSpinBox()
+        self.spin_nodata.setRange(0, 255)  # GDT_Byte
+        self.spin_nodata.setValue(0)
+        self.spin_nodata.setToolTip("Valor de pixel tratado como NoData.")
+        layout_settings.addWidget(self.spin_nodata)
+
+        self.chk_nodata.toggled.connect(self.spin_nodata.setEnabled)
 
         layout_settings.addStretch()
         group_settings.setLayout(layout_settings)
@@ -721,12 +745,15 @@ class SmartGeoTIFFDialog(QDialog):
         self.log_viewer.clear()
         self.progress_bar.setValue(0)
 
+        nodata_value = self.spin_nodata.value() if self.chk_nodata.isChecked() else None
+
         self.worker = GdalWorker(
             input_file,
             output_file,
             self.combo_epsg.currentText(),
             self.spin_threads.value(),
             custom_palette,
+            nodata_value,
         )
         self.worker.progress.connect(self._update_progress)
         self.worker.log.connect(self._append_log)
