@@ -677,17 +677,25 @@ class SmartGeoTIFFDialog(QDialog):
                 return
             band = ds.GetRasterBand(1)
             dtype = band.DataType
+
+            # Tenta stats cacheadas primeiro (rápido); se vazias, força cálculo aproximado
             stats = band.GetStatistics(True, False)  # approx=True, force=False
+            if stats[0] == 0 and stats[1] == 0:
+                # Sem cache — calcula com overviews se disponíveis (approx=True)
+                stats = band.GetStatistics(True, True)
+
             ds = None
             FLOAT_TYPES = (gdal.GDT_Float32, gdal.GDT_Float64)
             is_float = dtype in FLOAT_TYPES
             btn = self.radio_cont if is_float else self.radio_cat
             btn.setChecked(True)
             self._on_mode_changed(btn)
-            if stats and (stats[0] != 0 or stats[1] != 0):
+            if stats[1] > stats[0]:  # max > min = stats válidas
                 self._detected_min = stats[0]
                 self._detected_max = stats[1]
                 self.lbl_range.setText(f"Detectado: {stats[0]:.2f} – {stats[1]:.2f}")
+            else:
+                self.lbl_range.setText("Intervalo não disponível (sem cache de estatísticas)")
         except Exception as e:
             self._append_log(f"[AVISO] Não foi possível detectar dtype: {e}")
 
