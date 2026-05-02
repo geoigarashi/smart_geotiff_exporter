@@ -22,6 +22,7 @@ from qgis.PyQt.QtWidgets import (
     QFileDialog,
     QComboBox,
     QSpinBox,
+    QDoubleSpinBox,
     QTableWidget,
     QTableWidgetItem,
     QHeaderView,
@@ -30,6 +31,8 @@ from qgis.PyQt.QtWidgets import (
     QGroupBox,
     QMessageBox,
     QCheckBox,
+    QRadioButton,
+    QButtonGroup,
 )
 from qgis.PyQt.QtCore import QThread, pyqtSignal, Qt
 from qgis.PyQt.QtGui import QColor
@@ -76,6 +79,61 @@ PALETAS = {
     },
 }
 
+RAMPAS_CONTINUAS = {
+    "Spectral": [
+        (0.000, "#9e0142"), (0.100, "#d53e4f"), (0.200, "#f46d43"),
+        (0.300, "#fdae61"), (0.400, "#fee08b"), (0.500, "#ffffbf"),
+        (0.600, "#e6f598"), (0.700, "#abdda4"), (0.800, "#66c2a5"),
+        (0.900, "#3288bd"), (1.000, "#5e4fa2"),
+    ],
+    "Terrain": [
+        (0.000, "#333399"), (0.167, "#00b2b2"), (0.333, "#99cc66"),
+        (0.500, "#cccc33"), (0.667, "#996600"), (0.833, "#cc9933"),
+        (1.000, "#ffffff"),
+    ],
+    "Greys": [(0.000, "#000000"), (1.000, "#ffffff")],
+    "RdYlGn": [
+        (0.000, "#a50026"), (0.250, "#f46d43"), (0.500, "#ffffbf"),
+        (0.750, "#a6d96a"), (1.000, "#006837"),
+    ],
+    "Viridis": [
+        (0.000, "#440154"), (0.250, "#31688e"), (0.500, "#35b779"),
+        (0.750, "#90d743"), (1.000, "#fde725"),
+    ],
+}
+
+
+def _generate_pseudocolor_qml(output_path, min_val, max_val, ramp_name="Spectral"):
+    stops = RAMPAS_CONTINUAS.get(ramp_name, RAMPAS_CONTINUAS["Spectral"])
+    items = []
+    for ratio, hex_color in stops:
+        abs_val = min_val + ratio * (max_val - min_val)
+        items.append(
+            f'          <item value="{abs_val:.4f}" label="{abs_val:.2f}" '
+            f'color="{hex_color}" alpha="255"/>'
+        )
+    items_xml = "\n".join(items)
+    qml = f"""<!DOCTYPE qgis PUBLIC 'http://mrcc.com/qgis.dtd' 'SYSTEM'>
+<qgis version="3.22.0" styleCategories="Symbology">
+  <pipe>
+    <provider>
+      <resampling zoomedInResamplingMethod="bilinear" zoomedOutResamplingMethod="bilinear" maxOversampling="2"/>
+    </provider>
+    <rasterrenderer type="singlebandpseudocolor" opacity="1" alphaBand="-1" band="1"
+                    classificationMin="{min_val:.4f}" classificationMax="{max_val:.4f}">
+      <rasterTransparency/>
+      <rastershader>
+        <colorrampshader colorRampType="INTERPOLATED" clip="0"
+                         minimumValue="{min_val:.4f}" maximumValue="{max_val:.4f}">
+{items_xml}
+        </colorrampshader>
+      </rastershader>
+    </rasterrenderer>
+  </pipe>
+</qgis>"""
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(qml)
+
 
 # ---------------------------------------------------------------------------
 # THREAD DE PROCESSAMENTO GDAL (sem alterações de lógica em relação ao original)
@@ -85,7 +143,9 @@ class GdalWorker(QThread):
     log = pyqtSignal(str)
     finished = pyqtSignal(bool, str)
 
-    def __init__(self, input_path, output_path, epsg, threads, custom_palette, nodata_value=None):
+    def __init__(self, input_path, output_path, epsg, threads, custom_palette,
+                 nodata_value=None, mode="categorical",
+                 color_ramp=None, raster_min=None, raster_max=None):
         super().__init__()
         self.input_path = input_path
         self.output_path = output_path
@@ -93,6 +153,10 @@ class GdalWorker(QThread):
         self.threads = threads
         self.custom_palette = custom_palette
         self.nodata_value = nodata_value  # None = sem NoData
+        self.mode = mode
+        self.color_ramp = color_ramp
+        self.raster_min = raster_min
+        self.raster_max = raster_max
 
     def gdal_progress_callback(self, complete, message, user_data):
         self.progress.emit(int(complete * 100))
@@ -103,97 +167,99 @@ class GdalWorker(QThread):
             start_time = time.time()
             self.log.emit(f"Iniciando leitura de: {self.input_path}")
 
-            translate_options = gdal.TranslateOptions(
-                format="GTiff",
-                outputType=gdal.GDT_Byte,
-                outputSRS=self.epsg,
-                creationOptions=[
-                    "COMPRESS=ZSTD",
-                    "TILED=YES",
-                    "BLOCKXSIZE=512",
-                    "BLOCKYSIZE=512",
-                    "BIGTIFF=YES",
-                    f"NUM_THREADS={self.threads}",
-                    "PREDICTOR=1",
-                ],
-            )
-
-            self.log.emit("-> Executando gdal.Translate (Conversão e Compressão)...")
-            ds = gdal.Translate(
-                self.output_path,
-                self.input_path,
-                options=translate_options,
-                callback=self.gdal_progress_callback,
-            )
-
-            if ds is None:
-                raise Exception(
-                    "Falha ao criar o arquivo de saída. "
-                    "Verifique permissões ou espaço em disco."
+            if self.mode == "categorical":
+                # ── Modo Categórico (comportamento original intacto) ──────────────
+                translate_options = gdal.TranslateOptions(
+                    format="GTiff",
+                    outputType=gdal.GDT_Byte,
+                    outputSRS=self.epsg,
+                    creationOptions=[
+                        "COMPRESS=ZSTD",
+                        "TILED=YES",
+                        "BLOCKXSIZE=512",
+                        "BLOCKYSIZE=512",
+                        "BIGTIFF=YES",
+                        f"NUM_THREADS={self.threads}",
+                        "PREDICTOR=1",
+                    ],
                 )
 
-            elapsed_translate = time.time() - start_time
-            self.log.emit(f"-> Conversão concluída em {elapsed_translate:.2f}s.")
-            self.log.emit("-> Gerando overviews (pirâmides) via NEAREST...")
-            self.progress.emit(0)
+                self.log.emit("-> Executando gdal.Translate (Conversão e Compressão)...")
+                ds = gdal.Translate(
+                    self.output_path,
+                    self.input_path,
+                    options=translate_options,
+                    callback=self.gdal_progress_callback,
+                )
 
-            gdal.SetConfigOption("COMPRESS_OVERVIEW", "ZSTD")
-            ds.BuildOverviews(
-                "NEAREST", [2, 4, 8, 16, 32, 64], callback=self.gdal_progress_callback
-            )
+                if ds is None:
+                    raise Exception(
+                        "Falha ao criar o arquivo de saída. "
+                        "Verifique permissões ou espaço em disco."
+                    )
 
-            ds = None
-            self.log.emit("-> Injetando Metadados Limpos (RAT Esparsa)...")
+                elapsed_translate = time.time() - start_time
+                self.log.emit(f"-> Conversão concluída em {elapsed_translate:.2f}s.")
+                self.log.emit("-> Gerando overviews (pirâmides) via NEAREST...")
+                self.progress.emit(0)
 
-            ds_update = gdal.Open(self.output_path, gdal.GA_Update)
-            band = ds_update.GetRasterBand(1)
-            if self.nodata_value is not None:
-                band.SetNoDataValue(self.nodata_value)
-                self.log.emit(f"-> NoData definido como: {self.nodata_value}")
-            else:
-                self.log.emit("-> NoData não definido (todos os valores são válidos).")
+                gdal.SetConfigOption("COMPRESS_OVERVIEW", "ZSTD")
+                ds.BuildOverviews(
+                    "NEAREST", [2, 4, 8, 16, 32, 64], callback=self.gdal_progress_callback
+                )
 
-            color_table = gdal.ColorTable()
-            rat = gdal.RasterAttributeTable()
-            rat.CreateColumn("Value", gdal.GFT_Integer, gdal.GFU_MinMax)
-            rat.CreateColumn("Class_Name", gdal.GFT_String, gdal.GFU_Name)
-            rat.SetRowCount(len(self.custom_palette))
+                ds = None
+                self.log.emit("-> Injetando Metadados Limpos (RAT Esparsa)...")
 
-            for i in range(256):
-                if i in self.custom_palette:
-                    info = self.custom_palette[i]
-                    h = info["hex"].lstrip("#")
-                    rgb = tuple(int(h[j : j + 2], 16) for j in (0, 2, 4)) + (255,)
-                    color_table.SetColorEntry(i, rgb)
+                ds_update = gdal.Open(self.output_path, gdal.GA_Update)
+                band = ds_update.GetRasterBand(1)
+                if self.nodata_value is not None:
+                    band.SetNoDataValue(self.nodata_value)
+                    self.log.emit(f"-> NoData definido como: {self.nodata_value}")
                 else:
-                    color_table.SetColorEntry(i, (0, 0, 0, 0))
+                    self.log.emit("-> NoData não definido (todos os valores são válidos).")
 
-            for row_idx, (val, info) in enumerate(self.custom_palette.items()):
-                rat.SetValueAsInt(row_idx, 0, val)
-                rat.SetValueAsString(row_idx, 1, info["name"])
+                color_table = gdal.ColorTable()
+                rat = gdal.RasterAttributeTable()
+                rat.CreateColumn("Value", gdal.GFT_Integer, gdal.GFU_MinMax)
+                rat.CreateColumn("Class_Name", gdal.GFT_String, gdal.GFU_Name)
+                rat.SetRowCount(len(self.custom_palette))
 
-            band.SetColorTable(color_table)
-            band.SetDefaultRAT(rat)
-            ds_update = None
+                for i in range(256):
+                    if i in self.custom_palette:
+                        info = self.custom_palette[i]
+                        h = info["hex"].lstrip("#")
+                        rgb = tuple(int(h[j : j + 2], 16) for j in (0, 2, 4)) + (255,)
+                        color_table.SetColorEntry(i, rgb)
+                    else:
+                        color_table.SetColorEntry(i, (0, 0, 0, 0))
 
-            self.log.emit("-> Gerando arquivo de estilo rígido para QGIS (.qml)...")
-            qml_path = os.path.splitext(self.output_path)[0] + ".qml"
-            palette_entries = ""
-            for val, info in self.custom_palette.items():
-                alpha = 0 if (self.nodata_value is not None and val == self.nodata_value) else 255
-                label = (
-                    info["name"]
-                    .replace("<", "&lt;")
-                    .replace(">", "&gt;")
-                    .replace("≥", "&#8805;")
-                )
-                color = info["hex"]
-                palette_entries += (
-                    f'        <paletteEntry value="{val}" color="{color}" '
-                    f'label="{label}" alpha="{alpha}"/>\n'
-                )
+                for row_idx, (val, info) in enumerate(self.custom_palette.items()):
+                    rat.SetValueAsInt(row_idx, 0, val)
+                    rat.SetValueAsString(row_idx, 1, info["name"])
 
-            qml_content = f"""<!DOCTYPE qgis PUBLIC 'http://mrcc.com/qgis.dtd' 'SYSTEM'>
+                band.SetColorTable(color_table)
+                band.SetDefaultRAT(rat)
+                ds_update = None
+
+                self.log.emit("-> Gerando arquivo de estilo rígido para QGIS (.qml)...")
+                qml_path = os.path.splitext(self.output_path)[0] + ".qml"
+                palette_entries = ""
+                for val, info in self.custom_palette.items():
+                    alpha = 0 if (self.nodata_value is not None and val == self.nodata_value) else 255
+                    label = (
+                        info["name"]
+                        .replace("<", "&lt;")
+                        .replace(">", "&gt;")
+                        .replace("≥", "&#8805;")
+                    )
+                    color = info["hex"]
+                    palette_entries += (
+                        f'        <paletteEntry value="{val}" color="{color}" '
+                        f'label="{label}" alpha="{alpha}"/>\n'
+                    )
+
+                qml_content = f"""<!DOCTYPE qgis PUBLIC 'http://mrcc.com/qgis.dtd' 'SYSTEM'>
 <qgis version="3.22.0" styleCategories="Symbology">
   <pipe>
     <provider>
@@ -206,8 +272,67 @@ class GdalWorker(QThread):
     </rasterrenderer>
   </pipe>
 </qgis>"""
-            with open(qml_path, "w", encoding="utf-8") as f:
-                f.write(qml_content)
+                with open(qml_path, "w", encoding="utf-8") as f:
+                    f.write(qml_content)
+
+            else:
+                # ── Modo Contínuo (Float32/Int alto, preserva dtype) ─────────────
+                translate_options = gdal.TranslateOptions(
+                    format="GTiff",
+                    outputSRS=self.epsg,
+                    creationOptions=[
+                        "COMPRESS=ZSTD",
+                        "TILED=YES",
+                        "BLOCKXSIZE=512",
+                        "BLOCKYSIZE=512",
+                        "BIGTIFF=YES",
+                        f"NUM_THREADS={self.threads}",
+                        "PREDICTOR=3",  # floating-point predictor (Delta sobre bytes de float)
+                    ],
+                )
+
+                self.log.emit("-> Executando gdal.Translate (Compressão ZSTD, preservando dtype)...")
+                ds = gdal.Translate(
+                    self.output_path,
+                    self.input_path,
+                    options=translate_options,
+                    callback=self.gdal_progress_callback,
+                )
+
+                if ds is None:
+                    raise Exception(
+                        "Falha ao criar o arquivo de saída. "
+                        "Verifique permissões ou espaço em disco."
+                    )
+
+                elapsed_translate = time.time() - start_time
+                self.log.emit(f"-> Conversão concluída em {elapsed_translate:.2f}s.")
+                self.log.emit("-> Gerando overviews (pirâmides) via AVERAGE...")
+                self.progress.emit(0)
+
+                gdal.SetConfigOption("COMPRESS_OVERVIEW", "ZSTD")
+                ds.BuildOverviews(
+                    "AVERAGE", [2, 4, 8, 16, 32, 64], callback=self.gdal_progress_callback
+                )
+
+                ds = None
+
+                ds_update = gdal.Open(self.output_path, gdal.GA_Update)
+                band = ds_update.GetRasterBand(1)
+                if self.nodata_value is not None:
+                    band.SetNoDataValue(float(self.nodata_value))
+                    self.log.emit(f"-> NoData definido como: {self.nodata_value}")
+                else:
+                    self.log.emit("-> NoData não definido (todos os valores são válidos).")
+                ds_update = None
+
+                if self.color_ramp and self.raster_min is not None and self.raster_max is not None:
+                    self.log.emit("-> Gerando arquivo de estilo pseudocolor para QGIS (.qml)...")
+                    qml_path = os.path.splitext(self.output_path)[0] + ".qml"
+                    _generate_pseudocolor_qml(
+                        qml_path, self.raster_min, self.raster_max, self.color_ramp
+                    )
+                    self.log.emit("-> QML singlebandpseudocolor gerado.")
 
             total_time = time.time() - start_time
             msg_final = f"Processo TOTAL concluído com sucesso em {total_time:.2f}s."
@@ -232,6 +357,8 @@ class SmartGeoTIFFDialog(QDialog):
         super().__init__(parent)
         self.iface = iface
         self.worker = None
+        self._detected_min = None
+        self._detected_max = None
 
         self.setWindowTitle("Smart GeoTIFF Exporter")
         self.setMinimumSize(820, 780)
@@ -284,6 +411,22 @@ class SmartGeoTIFFDialog(QDialog):
 
         # ── 2. Parâmetros GDAL ─────────────────────────────────────────
         group_settings = QGroupBox("Parâmetros GDAL")
+        layout_settings_v = QVBoxLayout()
+
+        # Linha de modo: Categórico / Contínuo
+        layout_mode = QHBoxLayout()
+        self.radio_cat = QRadioButton("Categórico (inteiro, paleta + RAT)")
+        self.radio_cont = QRadioButton("Contínuo (float/int alto, sem RAT)")
+        self.radio_cat.setChecked(True)
+        self._mode_group = QButtonGroup(self)
+        self._mode_group.addButton(self.radio_cat)
+        self._mode_group.addButton(self.radio_cont)
+        self._mode_group.buttonClicked.connect(self._on_mode_changed)
+        layout_mode.addWidget(self.radio_cat)
+        layout_mode.addWidget(self.radio_cont)
+        layout_mode.addStretch()
+        layout_settings_v.addLayout(layout_mode)
+
         layout_settings = QHBoxLayout()
 
         layout_settings.addWidget(QLabel("EPSG de Saída:"))
@@ -317,20 +460,22 @@ class SmartGeoTIFFDialog(QDialog):
         )
         layout_settings.addWidget(self.chk_nodata)
 
-        self.spin_nodata = QSpinBox()
-        self.spin_nodata.setRange(0, 255)  # GDT_Byte
-        self.spin_nodata.setValue(0)
-        self.spin_nodata.setToolTip("Valor de pixel tratado como NoData.")
+        self.spin_nodata = QDoubleSpinBox()
+        self.spin_nodata.setRange(-9999999.0, 9999999.0)
+        self.spin_nodata.setDecimals(2)
+        self.spin_nodata.setValue(0.0)
+        self.spin_nodata.setToolTip("Valor de pixel tratado como NoData (aceita float, ex: -9999).")
         layout_settings.addWidget(self.spin_nodata)
 
         self.chk_nodata.toggled.connect(self.spin_nodata.setEnabled)
 
         layout_settings.addStretch()
-        group_settings.setLayout(layout_settings)
+        layout_settings_v.addLayout(layout_settings)
+        group_settings.setLayout(layout_settings_v)
         main_layout.addWidget(group_settings)
 
         # ── 3. Paleta e RAT ───────────────────────────────────────────
-        group_palette = QGroupBox("Metadados, Classes e Cores (RAT)")
+        self.group_palette = QGroupBox("Metadados, Classes e Cores (RAT)")
         layout_palette = QVBoxLayout()
 
         layout_combo_palette = QHBoxLayout()
@@ -407,8 +552,26 @@ class SmartGeoTIFFDialog(QDialog):
         layout_table_btns.addWidget(btn_load_palette)
         layout_palette.addLayout(layout_table_btns)
 
-        group_palette.setLayout(layout_palette)
-        main_layout.addWidget(group_palette, 1)
+        self.group_palette.setLayout(layout_palette)
+        main_layout.addWidget(self.group_palette, 1)
+
+        # ── 3b. Rampa de Cores (Modo Contínuo) ────────────────────────
+        self.group_ramp = QGroupBox("Rampa de Cores (Modo Contínuo)")
+        layout_ramp = QVBoxLayout()
+        layout_ramp_row = QHBoxLayout()
+        layout_ramp_row.addWidget(QLabel("Rampa:"))
+        self.combo_ramp = QComboBox()
+        self.combo_ramp.addItem("Nenhuma (sem QML)")
+        self.combo_ramp.addItems(list(RAMPAS_CONTINUAS.keys()))
+        layout_ramp_row.addWidget(self.combo_ramp)
+        layout_ramp_row.addSpacing(20)
+        self.lbl_range = QLabel("Intervalo detectado: —")
+        layout_ramp_row.addWidget(self.lbl_range)
+        layout_ramp_row.addStretch()
+        layout_ramp.addLayout(layout_ramp_row)
+        self.group_ramp.setLayout(layout_ramp)
+        self.group_ramp.setVisible(False)
+        main_layout.addWidget(self.group_ramp)
 
         # ── 4. Ações ──────────────────────────────────────────────────
         self.btn_process = QPushButton("INICIAR PROCESSAMENTO ZSTD")
@@ -472,6 +635,7 @@ class SmartGeoTIFFDialog(QDialog):
         )
         if file:
             self.line_input.setText(os.path.normpath(file))
+            self._on_input_selected(os.path.normpath(file))
 
     def _select_output(self):
         file, _ = QFileDialog.getSaveFileName(
@@ -498,6 +662,34 @@ class SmartGeoTIFFDialog(QDialog):
 
         self.line_input.setText(os.path.normpath(source))
         self._append_log(f"Camada ativa carregada: {source}")
+        self._on_input_selected(os.path.normpath(source))
+
+    def _on_mode_changed(self, button):
+        is_cont = (button is self.radio_cont)
+        self.group_palette.setVisible(not is_cont)
+        self.group_ramp.setVisible(is_cont)
+        self.spin_nodata.setValue(-9999.0 if is_cont else 0.0)
+
+    def _on_input_selected(self, path: str):
+        try:
+            ds = gdal.Open(path)
+            if ds is None:
+                return
+            band = ds.GetRasterBand(1)
+            dtype = band.DataType
+            stats = band.GetStatistics(True, False)  # approx=True, force=False
+            ds = None
+            FLOAT_TYPES = (gdal.GDT_Float32, gdal.GDT_Float64)
+            is_float = dtype in FLOAT_TYPES
+            btn = self.radio_cont if is_float else self.radio_cat
+            btn.setChecked(True)
+            self._on_mode_changed(btn)
+            if stats and (stats[0] != 0 or stats[1] != 0):
+                self._detected_min = stats[0]
+                self._detected_max = stats[1]
+                self.lbl_range.setText(f"Detectado: {stats[0]:.2f} – {stats[1]:.2f}")
+        except Exception as e:
+            self._append_log(f"[AVISO] Não foi possível detectar dtype: {e}")
 
     def _populate_table(self, theme_name):
         theme_data = PALETAS.get(theme_name, {})
@@ -735,11 +927,24 @@ class SmartGeoTIFFDialog(QDialog):
             )
             return
 
-        try:
-            custom_palette = self._get_palette_from_table()
-        except Exception as e:
-            QMessageBox.critical(self, "Erro de Validação", str(e))
-            return
+        mode = "continuous" if self.radio_cont.isChecked() else "categorical"
+
+        if mode == "categorical":
+            try:
+                custom_palette = self._get_palette_from_table()
+            except Exception as e:
+                QMessageBox.critical(self, "Erro de Validação", str(e))
+                return
+        else:
+            custom_palette = {}
+
+        ramp_name = None
+        raster_min = raster_max = None
+        if mode == "continuous":
+            combo_text = self.combo_ramp.currentText()
+            ramp_name = combo_text if combo_text != "Nenhuma (sem QML)" else None
+            raster_min = self._detected_min
+            raster_max = self._detected_max
 
         self.btn_process.setEnabled(False)
         self.log_viewer.clear()
@@ -754,6 +959,10 @@ class SmartGeoTIFFDialog(QDialog):
             self.spin_threads.value(),
             custom_palette,
             nodata_value,
+            mode=mode,
+            color_ramp=ramp_name,
+            raster_min=raster_min,
+            raster_max=raster_max,
         )
         self.worker.progress.connect(self._update_progress)
         self.worker.log.connect(self._append_log)
