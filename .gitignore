@@ -25,3 +25,7 @@ desktop.ini
 *.tmp
 *.bak
 *.swp
+
+# Tooling & Caches
+.ruff_cache/
+graphify-out/
