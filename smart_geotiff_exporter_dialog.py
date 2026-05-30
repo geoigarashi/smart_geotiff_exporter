@@ -180,7 +180,7 @@ class GdalWorker(QThread):
                         "BLOCKYSIZE=512",
                         "BIGTIFF=YES",
                         f"NUM_THREADS={self.threads}",
-                        "PREDICTOR=1",
+                        "PREDICTOR=2",
                     ],
                 )
 
