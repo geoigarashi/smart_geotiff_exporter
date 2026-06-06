@@ -628,6 +628,7 @@ class SmartGeoTIFFDialog(QDialog):
         layout_combo_palette = QHBoxLayout()
         layout_combo_palette.addWidget(QLabel("Modelo de Simbologia:"))
         self.combo_palette = QComboBox()
+        self.combo_palette.setMinimumWidth(160)
         self.combo_palette.addItems(list(PALETAS.keys()) + ["Personalizado"])
         self.combo_palette.currentTextChanged.connect(self._on_theme_changed)
         layout_combo_palette.addWidget(self.combo_palette)
