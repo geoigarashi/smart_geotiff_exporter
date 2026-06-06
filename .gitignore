@@ -27,6 +27,7 @@ icon3.png
 *.tmp
 *.bak
 *.swp
+*.zip
 
 # Tooling & Caches
 .ruff_cache/
