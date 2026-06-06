@@ -1136,11 +1136,27 @@ class SmartGeoTIFFDialog(QDialog):
         Args:
             theme_name: O nome do tema selecionado (ex: 'Aptidão', 'Personalizado').
         """
+        # Se mudar para outro tema, removemos o item temporário "Lista Carregada"
+        if theme_name != "Lista Carregada":
+            self.combo_palette.blockSignals(True)
+            index_loaded = self.combo_palette.findText("Lista Carregada")
+            if index_loaded != -1:
+                self.combo_palette.removeItem(index_loaded)
+            self.combo_palette.blockSignals(False)
+
         if theme_name == "Personalizado":
+            # Limpa a tabela para o usuário iniciar do zero
+            self.table_palette.blockSignals(True)
+            self.table_palette.setRowCount(0)
+            self.table_palette.blockSignals(False)
             return
+
+        if theme_name == "Lista Carregada":
+            return
+
         self._populate_table(theme_name)
 
-    def _save_palette(self):
+    def _save_palette(self) -> None:
         """Salva a paleta atual como arquivo JSON."""
         try:
             palette = self._get_palette_from_table()
@@ -1168,7 +1184,7 @@ class SmartGeoTIFFDialog(QDialog):
         except Exception as e:
             QMessageBox.critical(self, "Erro ao salvar", str(e))
 
-    def _load_palette(self):
+    def _load_palette(self) -> None:
         """Carrega paleta a partir de arquivo JSON ou QML."""
         path, _ = QFileDialog.getOpenFileName(
             self,
@@ -1198,6 +1214,16 @@ class SmartGeoTIFFDialog(QDialog):
             )
             return
         self._populate_table_from_dict(classes)
+
+        # Adiciona e seleciona temporariamente "Lista Carregada" no combo box
+        self.combo_palette.blockSignals(True)
+        idx_loaded = self.combo_palette.findText("Lista Carregada")
+        if idx_loaded == -1:
+            self.combo_palette.addItem("Lista Carregada")
+            idx_loaded = self.combo_palette.findText("Lista Carregada")
+        self.combo_palette.setCurrentIndex(idx_loaded)
+        self.combo_palette.blockSignals(False)
+
         QMessageBox.information(
             self,
             "Lista carregada",
