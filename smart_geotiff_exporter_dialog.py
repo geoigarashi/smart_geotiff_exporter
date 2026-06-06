@@ -546,16 +546,16 @@ class SmartGeoTIFFDialog(QDialog):
         self.combo_epsg = QComboBox()
         self.combo_epsg.addItems(
             [
-                "EPSG:4326",
-                "EPSG:4674",
-                "EPSG:31978",
-                "EPSG:31979",
-                "EPSG:31980",
-                "EPSG:31981",
-                "EPSG:31982",
-                "EPSG:31983",
-                "EPSG:31984",
-                "EPSG:31985",
+                "EPSG:4674 - SIRGAS 2000 (Geográfico)",
+                "EPSG:4326 - WGS 84 (Geográfico)",
+                "EPSG:31978 - SIRGAS 2000 / UTM 18S",
+                "EPSG:31979 - SIRGAS 2000 / UTM 19S",
+                "EPSG:31980 - SIRGAS 2000 / UTM 20S",
+                "EPSG:31981 - SIRGAS 2000 / UTM 21S",
+                "EPSG:31982 - SIRGAS 2000 / UTM 22S",
+                "EPSG:31983 - SIRGAS 2000 / UTM 23S",
+                "EPSG:31984 - SIRGAS 2000 / UTM 24S",
+                "EPSG:31985 - SIRGAS 2000 / UTM 25S",
             ]
         )
         layout_settings.addWidget(self.combo_epsg)
@@ -816,20 +816,30 @@ class SmartGeoTIFFDialog(QDialog):
             if srs is not None:
                 srs_clone = srs.Clone()
                 srs_clone.AutoIdentifyEPSG()
-                epsg_code = srs_clone.GetAuthorityCode(None)
-                if epsg_code:
-                    epsg_str = f"EPSG:{epsg_code}"
-                    index = self.combo_epsg.findText(epsg_str)
+                epsg_code_val = srs_clone.GetAuthorityCode(None)
+                if epsg_code_val:
+                    epsg_str = f"EPSG:{epsg_code_val}"
+                    index = -1
+                    for i in range(self.combo_epsg.count()):
+                        item_text = self.combo_epsg.itemText(i)
+                        if item_text.startswith(epsg_str):
+                            index = i
+                            break
+
                     if index != -1:
                         self.combo_epsg.setCurrentIndex(index)
-                        self._append_log(f"-> EPSG de entrada detectado e selecionado: {epsg_str}")
+                        self._append_log(
+                            f"-> EPSG de entrada detectado e selecionado: {self.combo_epsg.itemText(index)}"
+                        )
                     else:
                         # Adiciona o EPSG dinamicamente caso não esteja listado por padrão
-                        self.combo_epsg.addItem(epsg_str)
-                        new_index = self.combo_epsg.findText(epsg_str)
+                        srs_name = srs_clone.GetName() or "Projeção Personalizada"
+                        dynamic_text = f"{epsg_str} - {srs_name}"
+                        self.combo_epsg.addItem(dynamic_text)
+                        new_index = self.combo_epsg.findText(dynamic_text)
                         self.combo_epsg.setCurrentIndex(new_index)
                         self._append_log(
-                            f"-> EPSG de entrada detectado e adicionado dinamicamente: {epsg_str}"
+                            f"-> EPSG de entrada detectado e adicionado dinamicamente: {dynamic_text}"
                         )
 
             # Tenta stats cacheadas primeiro; se None ou vazias, força com overviews
@@ -1113,10 +1123,13 @@ class SmartGeoTIFFDialog(QDialog):
 
         nodata_value = self.spin_nodata.value() if self.chk_nodata.isChecked() else None
 
+        selected_epsg_text = self.combo_epsg.currentText().strip()
+        epsg_code = selected_epsg_text.split(" ")[0]  # Obtém apenas o código bruto "EPSG:XXXX"
+
         self.worker = GdalWorker(
             input_file,
             output_file,
-            self.combo_epsg.currentText(),
+            epsg_code,
             self.spin_threads.value(),
             custom_palette,
             nodata_value,
