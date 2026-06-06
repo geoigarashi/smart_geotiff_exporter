@@ -243,6 +243,7 @@ class GdalWorker(QThread):
                         srcSRS=input_epsg,
                         dstSRS=self.epsg,
                         resampleAlg=gdal.GRIORA_NearestNeighbour,  # Preserva classes categóricas
+                        callback=self.gdal_progress_callback,
                         creationOptions=[
                             "COMPRESS=ZSTD",
                             "TILED=YES",
@@ -257,7 +258,6 @@ class GdalWorker(QThread):
                         self.output_path,
                         self.input_path,
                         options=warp_options,
-                        callback=self.gdal_progress_callback,
                     )
                 else:
                     translate_options = gdal.TranslateOptions(
@@ -374,6 +374,7 @@ class GdalWorker(QThread):
                         srcSRS=input_epsg,
                         dstSRS=self.epsg,
                         resampleAlg=gdal.GRIORA_Bilinear,  # Resampling suave para valores reais
+                        callback=self.gdal_progress_callback,
                         creationOptions=[
                             "COMPRESS=ZSTD",
                             "TILED=YES",
@@ -388,7 +389,6 @@ class GdalWorker(QThread):
                         self.output_path,
                         self.input_path,
                         options=warp_options,
-                        callback=self.gdal_progress_callback,
                     )
                 else:
                     translate_options = gdal.TranslateOptions(
