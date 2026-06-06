@@ -49,7 +49,7 @@ Ele encapsula em uma única interface dentro do QGIS todo o pipeline que antes e
 - Suporte estendido a sistemas de referência nacionais: EPSG:4326, 4674 e todas as zonas UTM brasileiras do SIRGAS 2000 no hemisfério Sul (EPSG:31978 a 31985)
 - Controle de **threads** de processamento (1–32)
 - **Log em tempo real** com painel de console integrado
-- **Barra de progresso** dupla (conversão + overviews)
+- **Barra de progresso** dupla (conversão + overviews) e **Botão Cancelar** para interrupção segura do processo a qualquer momento
 - Processamento em `QThread` separada — a interface do QGIS não trava durante a operação
 
 ---

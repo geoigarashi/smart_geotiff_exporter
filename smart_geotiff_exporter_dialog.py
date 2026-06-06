@@ -181,9 +181,13 @@ class GdalWorker(QThread):
         self.color_ramp = color_ramp
         self.raster_min = raster_min
         self.raster_max = raster_max
+        self.is_cancelled = False
 
     def gdal_progress_callback(self, complete: float, message: str, user_data: None) -> int:
         """Callback do GDAL para atualização de progresso.
+
+        Verifica se houve cancelamento do processo por parte do usuário. Em caso positivo,
+        retorna 0 para que a execução do GDAL seja imediatamente interrompida.
 
         Args:
             complete: Taxa de conclusão de 0.0 a 1.0.
@@ -191,10 +195,17 @@ class GdalWorker(QThread):
             user_data: Dados de usuário opcionais passados pelo GDAL.
 
         Returns:
-            Retorna 1 para continuar o processamento.
+            Retorna 1 para continuar o processamento ou 0 para cancelar.
         """
+        if self.is_cancelled:
+            self.log.emit("[CANCELANDO] Interrupção do processo solicitada pelo usuário...")
+            return 0
         self.progress.emit(int(complete * 100))
         return 1
+
+    def cancel(self) -> None:
+        """Solicita o cancelamento imediato da execução da tarefa."""
+        self.is_cancelled = True
 
     def run(self) -> None:
         """Executa a exportação do raster com compressão ZSTD e pirâmides.
@@ -453,8 +464,12 @@ class GdalWorker(QThread):
             self.finished.emit(True, msg_final)
 
         except Exception as e:
-            self.log.emit(f"[ERRO CRÍTICO] {str(e)}")
-            self.finished.emit(False, str(e))
+            if self.is_cancelled:
+                self.log.emit("[PROCESSAMENTO CANCELADO] O processo foi abortado com sucesso.")
+                self.finished.emit(False, "Processamento cancelado pelo usuário.")
+            else:
+                self.log.emit(f"[ERRO CRÍTICO] {str(e)}")
+                self.finished.emit(False, str(e))
 
 
 # ---------------------------------------------------------------------------
@@ -698,6 +713,8 @@ class SmartGeoTIFFDialog(QDialog):
         main_layout.addWidget(self.group_ramp)
 
         # ── 4. Ações ──────────────────────────────────────────────────
+        layout_actions = QHBoxLayout()
+
         self.btn_process = QPushButton("INICIAR PROCESSAMENTO ZSTD")
         self.btn_process.setMinimumHeight(42)
         self.btn_process.setStyleSheet(
@@ -705,7 +722,19 @@ class SmartGeoTIFFDialog(QDialog):
             "font-weight: bold; font-size: 14px;"
         )
         self.btn_process.clicked.connect(self._start_processing)
-        main_layout.addWidget(self.btn_process)
+
+        self.btn_cancel = QPushButton("CANCELAR")
+        self.btn_cancel.setMinimumHeight(42)
+        self.btn_cancel.setStyleSheet(
+            "background-color: #B71C1C; color: white; "
+            "font-weight: bold; font-size: 14px;"
+        )
+        self.btn_cancel.setEnabled(False)
+        self.btn_cancel.clicked.connect(self._cancel_processing)
+
+        layout_actions.addWidget(self.btn_process, 3)
+        layout_actions.addWidget(self.btn_cancel, 1)
+        main_layout.addLayout(layout_actions)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setValue(0)
@@ -1118,6 +1147,7 @@ class SmartGeoTIFFDialog(QDialog):
             raster_max = self._detected_max
 
         self.btn_process.setEnabled(False)
+        self.btn_cancel.setEnabled(True)
         self.log_viewer.clear()
         self.progress_bar.setValue(0)
 
@@ -1143,8 +1173,15 @@ class SmartGeoTIFFDialog(QDialog):
         self.worker.finished.connect(self._processing_finished)
         self.worker.start()
 
-    def _processing_finished(self, success, message):
+    def _processing_finished(self, success: bool, message: str) -> None:
+        """Chamado quando a thread GdalWorker finaliza seu processamento.
+
+        Args:
+            success: True se o processamento ocorreu sem falhas, False caso contrário.
+            message: Mensagem descritiva do status final.
+        """
         self.btn_process.setEnabled(True)
+        self.btn_cancel.setEnabled(False)
 
         if success:
             QMessageBox.information(self, "Sucesso!", message)
@@ -1159,3 +1196,10 @@ class SmartGeoTIFFDialog(QDialog):
                 )
         else:
             QMessageBox.critical(self, "Erro no Processamento", message)
+
+    def _cancel_processing(self) -> None:
+        """Solicita o cancelamento da thread de processamento atual."""
+        if self.worker and self.worker.isRunning():
+            self._append_log("-> Solicitando cancelamento ao GDAL...")
+            self.worker.cancel()
+            self.btn_cancel.setEnabled(False)
