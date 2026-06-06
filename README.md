@@ -83,7 +83,7 @@ Ele encapsula em uma única interface dentro do QGIS todo o pipeline que antes e
 
 ### Pelo Gerenciador de Plugins (recomendado)
 
-1. Baixe o arquivo `smart_geotiff_exporter.zip` na página de [Releases](../../releases)
+1. Baixe o arquivo `smart_geotiff_exporter_<versão>.zip` na página de [Releases](../../releases)
 2. No QGIS: **Plugins → Gerenciar e Instalar Plugins → Instalar a partir de ZIP**
 3. Selecione o `.zip` baixado e clique em **Instalar Plugin**
 4. O plugin estará disponível em: **Raster → Smart GeoTIFF Exporter**
