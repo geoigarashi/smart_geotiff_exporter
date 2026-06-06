@@ -1,6 +1,4 @@
-# Smart GeoTIFF Exporter
-
-> Plugin QGIS para exportação corporativa de rasters com compressão **ZSTD**, pirâmides automáticas, paleta de cores configurável e geração de estilo **QML** pronto para uso.
+> Plugin QGIS para exportação e otimização de rasters com compressão **ZSTD**, pirâmides automáticas, paleta de cores configurável e geração de estilo **QML** pronto para uso.
 
 [![QGIS](https://img.shields.io/badge/QGIS-3.16%2B-green?logo=qgis)](https://qgis.org)
 [![Python](https://img.shields.io/badge/Python-3.x-blue?logo=python)](https://python.org)
@@ -24,14 +22,14 @@
 
 ## Sobre o Plugin
 
-O **Smart GeoTIFF Exporter** nasceu da necessidade de padronizar e acelerar a exportação de rasters classificados (Aptidão, Declividade, Uso do Solo) em um fluxo corporativo de geoprocessamento.
+O **Smart GeoTIFF Exporter** nasceu da necessidade de padronizar e acelerar a exportação de rasters classificados (Aptidão, Declividade, Uso do Solo) em fluxos de geoprocessamento.
 
 Ele encapsula em uma única interface dentro do QGIS todo o pipeline que antes exigia linha de comando ou scripts externos:
 
 1. **Conversão, compressão e reprojeção opcional** para GeoTIFF tileado com ZSTD via `gdal.Translate` / `gdal.Warp`
 2. **Geração de overviews** (pirâmides) com resampling NEAREST/AVERAGE
 3. **Injeção de metadados** via Raster Attribute Table (RAT) esparsa
-4. **Paleta de cores corporativa** com visualização imediata na tabela
+4. **Modelos de simbologia de classes** com visualização imediata na tabela
 5. **Geração automática do arquivo `.qml`** de estilo para QGIS
 6. **Carregamento direto** da camada processada no projeto
 
@@ -39,7 +37,9 @@ Ele encapsula em uma única interface dentro do QGIS todo o pipeline que antes e
 
 ## Funcionalidades
 
-- Temas corporativos pré-definidos: **Aptidão**, **Declividade** e **Uso do Solo**
+- Modelos de simbologia pré-definidos: **Aptidão**, **Declividade** e **Uso do Solo**
+- **Painel Lateral de Ajuda e Tutorial**: painel integrado na interface que orienta o usuário no fluxo de trabalho e apresenta dicas de otimização e performance
+- **Lógica de Estado "Personalizado" (UX)**: o combo box de simbologia muda automaticamente para "Personalizado" ao editar, adicionar ou remover qualquer classe na tabela, indicando alterações nos modelos pré-definidos
 - **Tabela de classes totalmente editável**: adicione, remova e edite qualquer célula — incluindo a coluna **Valor (Pixel)** — com validação automática de duplicatas
 - **Salvar/Carregar listas de classes** em `.json` para reutilização em projetos futuros
 - **Importação de paleta a partir de `.qml`** do QGIS — reaproveite estilos já criados no projeto diretamente na tabela RAT
@@ -114,7 +114,7 @@ Após copiar, reinicie o QGIS e ative o plugin em **Plugins → Gerenciar e Inst
 2. **Arquivo de origem:** clique em `Procurar...` para selecionar um arquivo raster (`.vrt`, `.sdat`, `.tif`, `.img`) — ou clique em `Usar camada ativa` para usar a camada selecionada no projeto
 3. **Arquivo de destino:** clique em `Salvar como...` e defina o caminho do GeoTIFF de saída
 4. Selecione o **EPSG de saída** (o EPSG do raster de origem é detectado e selecionado automaticamente por padrão; altere-o se pretender realizar a reprojeção geométrica) e o número de **Threads**
-5. Escolha o **Tema Corporativo** ou personalize a tabela de classes (adicione/remova/edite linhas)
+5. Escolha o **Modelo de Simbologia** ou personalize a tabela de classes (adicione/remova/edite linhas)
 6. Clique em **INICIAR PROCESSAMENTO ZSTD**
 7. Acompanhe o progresso no painel de log e na barra de progresso
 
@@ -172,4 +172,4 @@ smart_geotiff_exporter/
 
 ---
 
-*Plugin desenvolvido para fluxos corporativos de geoprocessamento raster com padronização de metadados e estilo QGIS.*
+*Plugin desenvolvido para fluxos de geoprocessamento raster com padronização de metadados e estilo QGIS.*

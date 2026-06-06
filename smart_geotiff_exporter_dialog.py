@@ -14,6 +14,7 @@ import xml.etree.ElementTree as ET
 
 from qgis.PyQt.QtWidgets import (
     QDialog,
+    QWidget,
     QVBoxLayout,
     QHBoxLayout,
     QPushButton,
@@ -33,9 +34,11 @@ from qgis.PyQt.QtWidgets import (
     QCheckBox,
     QRadioButton,
     QButtonGroup,
+    QFrame,
+    QTextBrowser,
 )
 from qgis.PyQt.QtCore import QThread, pyqtSignal, Qt
-from qgis.PyQt.QtGui import QColor
+from qgis.PyQt.QtGui import QColor, QPixmap
 
 from osgeo import gdal
 
@@ -489,7 +492,7 @@ class SmartGeoTIFFDialog(QDialog):
         self._detected_max = None
 
         self.setWindowTitle("Smart GeoTIFF Exporter")
-        self.setMinimumSize(820, 780)
+        self.setMinimumSize(1080, 780)
         # Mantém a janela sempre visível mesmo ao clicar fora
         self.setWindowFlags(self.windowFlags() | Qt.Window)
         self._init_ui()
@@ -497,8 +500,13 @@ class SmartGeoTIFFDialog(QDialog):
     # ------------------------------------------------------------------
     # Construção da Interface
     # ------------------------------------------------------------------
-    def _init_ui(self):
+    def _init_ui(self) -> None:
+        """Cria e organiza todos os elementos da interface gráfica (PyQt)."""
         main_layout = QVBoxLayout(self)
+
+        # Layout horizontal principal para dividir controles (esquerda) e ajuda (direita)
+        workspace_layout = QHBoxLayout()
+        left_layout = QVBoxLayout()
 
         # ── 1. Arquivos ────────────────────────────────────────────────
         group_files = QGroupBox("Arquivos e Diretórios")
@@ -535,7 +543,7 @@ class SmartGeoTIFFDialog(QDialog):
         layout_files.addLayout(layout_input)
         layout_files.addLayout(layout_output)
         group_files.setLayout(layout_files)
-        main_layout.addWidget(group_files)
+        left_layout.addWidget(group_files)
 
         # ── 2. Parâmetros GDAL ─────────────────────────────────────────
         group_settings = QGroupBox("Parâmetros GDAL")
@@ -611,17 +619,17 @@ class SmartGeoTIFFDialog(QDialog):
         layout_settings.addStretch()
         layout_settings_v.addLayout(layout_settings)
         group_settings.setLayout(layout_settings_v)
-        main_layout.addWidget(group_settings)
+        left_layout.addWidget(group_settings)
 
         # ── 3. Paleta e RAT ───────────────────────────────────────────
-        self.group_palette = QGroupBox("Metadados, Classes e Cores (RAT)")
+        self.group_palette = QGroupBox("Metadados e Simbologia (RAT)")
         layout_palette = QVBoxLayout()
 
         layout_combo_palette = QHBoxLayout()
-        layout_combo_palette.addWidget(QLabel("Tema Corporativo:"))
+        layout_combo_palette.addWidget(QLabel("Modelo de Simbologia:"))
         self.combo_palette = QComboBox()
-        self.combo_palette.addItems(list(PALETAS.keys()))
-        self.combo_palette.currentTextChanged.connect(self._populate_table)
+        self.combo_palette.addItems(list(PALETAS.keys()) + ["Personalizado"])
+        self.combo_palette.currentTextChanged.connect(self._on_theme_changed)
         layout_combo_palette.addWidget(self.combo_palette)
         layout_combo_palette.addStretch()
         layout_palette.addLayout(layout_combo_palette)
@@ -666,7 +674,7 @@ class SmartGeoTIFFDialog(QDialog):
             "background-color: #E65100; color: white; font-weight: bold;"
         )
         btn_reset_table.clicked.connect(
-            lambda: self._populate_table(self.combo_palette.currentText())
+            lambda: self._on_theme_changed(self.combo_palette.currentText())
         )
 
         btn_save_palette = QPushButton("💾  Salvar Lista...")
@@ -692,7 +700,7 @@ class SmartGeoTIFFDialog(QDialog):
         layout_palette.addLayout(layout_table_btns)
 
         self.group_palette.setLayout(layout_palette)
-        main_layout.addWidget(self.group_palette, 1)
+        left_layout.addWidget(self.group_palette, 1)
 
         # ── 3b. Rampa de Cores (Modo Contínuo) ────────────────────────
         self.group_ramp = QGroupBox("Rampa de Cores (Modo Contínuo)")
@@ -710,7 +718,101 @@ class SmartGeoTIFFDialog(QDialog):
         layout_ramp.addLayout(layout_ramp_row)
         self.group_ramp.setLayout(layout_ramp)
         self.group_ramp.setVisible(False)
-        main_layout.addWidget(self.group_ramp)
+        left_layout.addWidget(self.group_ramp)
+
+        # ── Painel de Ajuda / Tutorial (Lado Direito) ─────────────────
+        right_layout = QVBoxLayout()
+
+        # Cabeçalho do painel
+        lbl_title = QLabel("Smart GeoTIFF Exporter")
+        lbl_title.setStyleSheet("font-weight: bold; font-size: 14px; color: #1565C0;")
+        lbl_title.setAlignment(Qt.AlignCenter)
+        right_layout.addWidget(lbl_title)
+
+        # Logos lado a lado
+        layout_logos = QHBoxLayout()
+        plugin_dir = os.path.dirname(__file__)
+        icon_path = os.path.normpath(os.path.join(plugin_dir, "icon.png"))
+        logo_path = os.path.normpath(os.path.join(plugin_dir, "Logo-GEO-HQ.svg"))
+
+        lbl_icon = QLabel()
+        if os.path.exists(icon_path):
+            pix_icon = QPixmap(icon_path)
+            lbl_icon.setPixmap(pix_icon.scaled(60, 60, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        lbl_icon.setAlignment(Qt.AlignCenter)
+
+        lbl_logo = QLabel()
+        if os.path.exists(logo_path):
+            pix_logo = QPixmap(logo_path)
+            lbl_logo.setPixmap(pix_logo.scaled(100, 60, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        lbl_logo.setAlignment(Qt.AlignCenter)
+
+        layout_logos.addWidget(lbl_icon)
+        layout_logos.addWidget(lbl_logo)
+        right_layout.addLayout(layout_logos)
+
+        # Tutorial em HTML
+        help_browser = QTextBrowser()
+        help_browser.setReadOnly(True)
+        help_browser.setOpenExternalLinks(True)
+        help_browser.setStyleSheet(
+            "background-color: #f9f9f9; border: 1px solid #dcdcdc; border-radius: 4px; padding: 4px;"
+        )
+
+        html_help = """
+        <html>
+        <head>
+        <style>
+            body { font-family: 'Segoe UI', Arial, sans-serif; font-size: 11px; color: #333333; line-height: 1.4; }
+            h3 { color: #1565C0; font-size: 12px; margin-top: 8px; margin-bottom: 4px; border-bottom: 1px solid #dcdcdc; padding-bottom: 2px; }
+            ol, ul { padding-left: 15px; margin-top: 4px; margin-bottom: 4px; }
+            li { margin-bottom: 3px; }
+            b { color: #0d47a1; }
+        </style>
+        </head>
+        <body>
+        <h3>Passo a Passo</h3>
+        <ol>
+            <li><b>Origem dos dados:</b> Selecione o arquivo raster (.tif, .vrt, .sdat, .img) ou clique em "Usar camada ativa". O plugin detectará o tipo e o EPSG original.</li>
+            <li><b>Destino:</b> Defina em "Salvar como..." o caminho do GeoTIFF de saída.</li>
+            <li><b>Projeção & CPU:</b> Escolha o EPSG de destino. Se for diferente da origem, o plugin fará a reprojeção geométrica via <i>gdal.Warp</i>. Ajuste o número de threads (CPU).</li>
+            <li><b>Simbologia e Classes:</b>
+                <ul>
+                    <li><b>Categórico:</b> Para dados discretos e classes. Cria tabela RAT e arquivo QML paletizado.</li>
+                    <li><b>Contínuo:</b> Para rasters de valores reais (altitude, declividade contínua). Gera estilo QML pseudocolor com rampa.</li>
+                </ul>
+            </li>
+            <li><b>Processar:</b> Clique em "Iniciar Processamento" e acompanhe pelo console de logs.</li>
+        </ol>
+        <h3>Dicas Úteis</h3>
+        <ul>
+            <li>A compressão <b>ZSTD</b> combinada com particionamento em blocos (TILED=YES) reduz consideravelmente o tamanho do arquivo sem perda de dados e acelera a renderização no QGIS.</li>
+            <li><b>Preditor FP (3):</b> No modo contínuo, o plugin ativa o preditor de ponto flutuante, reorganizando os bytes para obter compressões superiores.</li>
+            <li><b>Cancelamento:</b> Se precisar interromper o processamento, clique em CANCELAR. O processo é abortado com segurança no motor do GDAL.</li>
+        </ul>
+        </body>
+        </html>
+        """
+        help_browser.setHtml(html_help)
+        right_layout.addWidget(help_browser)
+
+        # Limita a largura do painel direito
+        right_widget = QWidget()
+        right_widget.setLayout(right_layout)
+        right_widget.setFixedWidth(280)
+
+        # Montagem do layout horizontal de trabalho
+        workspace_layout.addLayout(left_layout)
+
+        # Divisor vertical entre os dois painéis
+        divider = QFrame()
+        divider.setFrameShape(QFrame.VLine)
+        divider.setFrameShadow(QFrame.Sunken)
+        workspace_layout.addWidget(divider)
+        workspace_layout.addWidget(right_widget)
+
+        # Adiciona o workspace no topo do layout principal
+        main_layout.addLayout(workspace_layout)
 
         # ── 4. Ações ──────────────────────────────────────────────────
         layout_actions = QHBoxLayout()
@@ -921,7 +1023,7 @@ class SmartGeoTIFFDialog(QDialog):
             self.table_palette.setItem(row, 2, item_hex)
         self.table_palette.blockSignals(False)
 
-    def _add_table_row(self):
+    def _add_table_row(self) -> None:
         """Insere uma nova linha editável ao final da tabela."""
         row = self.table_palette.rowCount()
         self.table_palette.insertRow(row)
@@ -948,8 +1050,9 @@ class SmartGeoTIFFDialog(QDialog):
         # Entra em modo de edição no campo Nome imediatamente
         self.table_palette.setCurrentCell(row, 1)
         self.table_palette.editItem(self.table_palette.item(row, 1))
+        self._set_combo_to_custom()
 
-    def _remove_table_rows(self):
+    def _remove_table_rows(self) -> None:
         """Remove as linhas selecionadas na tabela."""
         selected_rows = sorted(
             set(idx.row() for idx in self.table_palette.selectedIndexes()),
@@ -971,45 +1074,71 @@ class SmartGeoTIFFDialog(QDialog):
         if confirm == QMessageBox.Yes:
             for row in selected_rows:
                 self.table_palette.removeRow(row)
+            self._set_combo_to_custom()
 
-    def _on_item_changed(self, item):
-        """Valida edição na coluna 'Valor (Pixel)': inteiro único, sem duplicata."""
-        if self._editing or item.column() != 0:
+    def _on_item_changed(self, item: QTableWidgetItem) -> None:
+        """Valida edição na coluna 'Valor (Pixel)' e altera o combo box para 'Personalizado'.
+
+        Args:
+            item: O item da tabela que foi modificado pelo usuário.
+        """
+        if self._editing:
             return
-        text = item.text().strip()
-        previous = item.data(Qt.UserRole)
-        # Validar inteiro >= 0
-        try:
-            new_val = int(text)
-            if new_val < 0:
-                raise ValueError
-        except ValueError:
-            self._editing = True
-            item.setText(str(previous))
-            self._editing = False
-            QMessageBox.warning(
-                self,
-                "Valor inválido",
-                f"'{text}' não é um inteiro válido (≥ 0). Valor revertido.",
-            )
-            return
-        # Verificar duplicata
-        for r in range(self.table_palette.rowCount()):
-            if r == item.row():
-                continue
-            other = self.table_palette.item(r, 0)
-            if other and other.text().strip() == str(new_val):
+
+        if item.column() == 0:
+            text = item.text().strip()
+            previous = item.data(Qt.UserRole)
+            try:
+                new_val = int(text)
+                if new_val < 0:
+                    raise ValueError
+            except ValueError:
                 self._editing = True
                 item.setText(str(previous))
                 self._editing = False
                 QMessageBox.warning(
                     self,
-                    "Valor duplicado",
-                    f"O valor {new_val} já existe na linha {r + 1}. Valor revertido.",
+                    "Valor inválido",
+                    f"'{text}' não é um inteiro válido (≥ 0). Valor revertido.",
                 )
                 return
-        # Válido: atualiza referência anterior
-        item.setData(Qt.UserRole, new_val)
+
+            for r in range(self.table_palette.rowCount()):
+                if r == item.row():
+                    continue
+                other = self.table_palette.item(r, 0)
+                if other and other.text().strip() == str(new_val):
+                    self._editing = True
+                    item.setText(str(previous))
+                    self._editing = False
+                    QMessageBox.warning(
+                        self,
+                        "Valor duplicado",
+                        f"O valor {new_val} já existe na linha {r + 1}. Valor revertido.",
+                    )
+                    return
+            item.setData(Qt.UserRole, new_val)
+
+        # Se qualquer valor mudou, define como Personalizado
+        self._set_combo_to_custom()
+
+    def _set_combo_to_custom(self) -> None:
+        """Altera a seleção do combo box de simbologia para 'Personalizado' sem repopular a tabela."""
+        self.combo_palette.blockSignals(True)
+        index = self.combo_palette.findText("Personalizado")
+        if index != -1:
+            self.combo_palette.setCurrentIndex(index)
+        self.combo_palette.blockSignals(False)
+
+    def _on_theme_changed(self, theme_name: str) -> None:
+        """Chamado quando a seleção do combo box de simbologia muda.
+
+        Args:
+            theme_name: O nome do tema selecionado (ex: 'Aptidão', 'Personalizado').
+        """
+        if theme_name == "Personalizado":
+            return
+        self._populate_table(theme_name)
 
     def _save_palette(self):
         """Salva a paleta atual como arquivo JSON."""
