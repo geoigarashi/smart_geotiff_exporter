@@ -143,9 +143,33 @@ class GdalWorker(QThread):
     log = pyqtSignal(str)
     finished = pyqtSignal(bool, str)
 
-    def __init__(self, input_path, output_path, epsg, threads, custom_palette,
-                 nodata_value=None, mode="categorical",
-                 color_ramp=None, raster_min=None, raster_max=None):
+    def __init__(
+        self,
+        input_path: str,
+        output_path: str,
+        epsg: str,
+        threads: int,
+        custom_palette: dict[int, dict[str, str]],
+        nodata_value: float | None = None,
+        mode: str = "categorical",
+        color_ramp: str | None = None,
+        raster_min: float | None = None,
+        raster_max: float | None = None,
+    ) -> None:
+        """Inicializa o trabalhador GDAL.
+
+        Args:
+            input_path: Caminho do arquivo raster de entrada.
+            output_path: Caminho do arquivo raster de saída (GeoTIFF).
+            epsg: Código EPSG de destino (ex: 'EPSG:31983').
+            threads: Quantidade de threads para paralelismo da compressão.
+            custom_palette: Dicionário mapeando pixel inteiro para dicionário de cores/nomes.
+            nodata_value: Valor opcional a ser definido como NoData.
+            mode: Modo de exportação ('categorical' ou 'continuous').
+            color_ramp: Nome da rampa de cores contínua (ex: 'Spectral').
+            raster_min: Valor mínimo do raster (necessário para rampa contínua).
+            raster_max: Valor máximo do raster (necessário para rampa contínua).
+        """
         super().__init__()
         self.input_path = input_path
         self.output_path = output_path
@@ -158,39 +182,105 @@ class GdalWorker(QThread):
         self.raster_min = raster_min
         self.raster_max = raster_max
 
-    def gdal_progress_callback(self, complete, message, user_data):
+    def gdal_progress_callback(self, complete: float, message: str, user_data: None) -> int:
+        """Callback do GDAL para atualização de progresso.
+
+        Args:
+            complete: Taxa de conclusão de 0.0 a 1.0.
+            message: Mensagem de progresso do GDAL.
+            user_data: Dados de usuário opcionais passados pelo GDAL.
+
+        Returns:
+            Retorna 1 para continuar o processamento.
+        """
         self.progress.emit(int(complete * 100))
         return 1
 
-    def run(self):
+    def run(self) -> None:
+        """Executa a exportação do raster com compressão ZSTD e pirâmides.
+
+        Determina o EPSG original do raster e decide se deve utilizar `gdal.Translate`
+        (caso o EPSG original seja igual ao EPSG de destino) ou `gdal.Warp` (caso seja
+        necessária a reprojeção geométrica dos pixels).
+        """
         try:
             start_time = time.time()
             self.log.emit(f"Iniciando leitura de: {self.input_path}")
 
-            if self.mode == "categorical":
-                # ── Modo Categórico (comportamento original intacto) ──────────────
-                translate_options = gdal.TranslateOptions(
-                    format="GTiff",
-                    outputType=gdal.GDT_Byte,
-                    outputSRS=self.epsg,
-                    creationOptions=[
-                        "COMPRESS=ZSTD",
-                        "TILED=YES",
-                        "BLOCKXSIZE=512",
-                        "BLOCKYSIZE=512",
-                        "BIGTIFF=YES",
-                        f"NUM_THREADS={self.threads}",
-                        "PREDICTOR=1",
-                    ],
+            # Detecção do EPSG original do raster de entrada
+            ds_in = gdal.Open(self.input_path)
+            if ds_in is None:
+                raise Exception(f"Não foi possível abrir o arquivo de entrada: {self.input_path}")
+
+            srs_in = ds_in.GetSpatialRef()
+            input_epsg = None
+            if srs_in is not None:
+                srs_in_clone = srs_in.Clone()
+                srs_in_clone.AutoIdentifyEPSG()
+                input_epsg_code = srs_in_clone.GetAuthorityCode(None)
+                if input_epsg_code:
+                    input_epsg = f"EPSG:{input_epsg_code}"
+
+            ds_in = None  # Fecha o dataset temporário de leitura
+
+            needs_reprojection = False
+            if input_epsg and self.epsg:
+                if input_epsg.strip().upper() != self.epsg.strip().upper():
+                    needs_reprojection = True
+                    self.log.emit(f"-> Reprojeção necessária: {input_epsg} para {self.epsg}")
+            else:
+                self.log.emit(
+                    "-> Projeção original não detectada ou indefinida. Preservando coordenadas."
                 )
 
-                self.log.emit("-> Executando gdal.Translate (Conversão e Compressão)...")
-                ds = gdal.Translate(
-                    self.output_path,
-                    self.input_path,
-                    options=translate_options,
-                    callback=self.gdal_progress_callback,
-                )
+            if self.mode == "categorical":
+                # ── Modo Categórico (comportamento original preservado ou reprojetado) ──────────────
+                if needs_reprojection:
+                    self.log.emit("-> Executando gdal.Warp (Reprojeção geométrica)...")
+                    warp_options = gdal.WarpOptions(
+                        format="GTiff",
+                        outputType=gdal.GDT_Byte,
+                        srcSRS=input_epsg,
+                        dstSRS=self.epsg,
+                        resampleAlg=gdal.GRIORA_NearestNeighbour,  # Preserva classes categóricas
+                        creationOptions=[
+                            "COMPRESS=ZSTD",
+                            "TILED=YES",
+                            "BLOCKXSIZE=512",
+                            "BLOCKYSIZE=512",
+                            "BIGTIFF=YES",
+                            f"NUM_THREADS={self.threads}",
+                            "PREDICTOR=1",
+                        ],
+                    )
+                    ds = gdal.Warp(
+                        self.output_path,
+                        self.input_path,
+                        options=warp_options,
+                        callback=self.gdal_progress_callback,
+                    )
+                else:
+                    translate_options = gdal.TranslateOptions(
+                        format="GTiff",
+                        outputType=gdal.GDT_Byte,
+                        outputSRS=self.epsg,
+                        creationOptions=[
+                            "COMPRESS=ZSTD",
+                            "TILED=YES",
+                            "BLOCKXSIZE=512",
+                            "BLOCKYSIZE=512",
+                            "BIGTIFF=YES",
+                            f"NUM_THREADS={self.threads}",
+                            "PREDICTOR=1",
+                        ],
+                    )
+                    self.log.emit("-> Executando gdal.Translate (Conversão e Compressão)...")
+                    ds = gdal.Translate(
+                        self.output_path,
+                        self.input_path,
+                        options=translate_options,
+                        callback=self.gdal_progress_callback,
+                    )
 
                 if ds is None:
                     raise Exception(
@@ -277,27 +367,50 @@ class GdalWorker(QThread):
 
             else:
                 # ── Modo Contínuo (Float32/Int alto, preserva dtype) ─────────────
-                translate_options = gdal.TranslateOptions(
-                    format="GTiff",
-                    outputSRS=self.epsg,
-                    creationOptions=[
-                        "COMPRESS=ZSTD",
-                        "TILED=YES",
-                        "BLOCKXSIZE=512",
-                        "BLOCKYSIZE=512",
-                        "BIGTIFF=YES",
-                        f"NUM_THREADS={self.threads}",
-                        "PREDICTOR=3",  # floating-point predictor (Delta sobre bytes de float)
-                    ],
-                )
-
-                self.log.emit("-> Executando gdal.Translate (Compressão ZSTD, preservando dtype)...")
-                ds = gdal.Translate(
-                    self.output_path,
-                    self.input_path,
-                    options=translate_options,
-                    callback=self.gdal_progress_callback,
-                )
+                if needs_reprojection:
+                    self.log.emit("-> Executando gdal.Warp (Reprojeção geométrica)...")
+                    warp_options = gdal.WarpOptions(
+                        format="GTiff",
+                        srcSRS=input_epsg,
+                        dstSRS=self.epsg,
+                        resampleAlg=gdal.GRIORA_Bilinear,  # Resampling suave para valores reais
+                        creationOptions=[
+                            "COMPRESS=ZSTD",
+                            "TILED=YES",
+                            "BLOCKXSIZE=512",
+                            "BLOCKYSIZE=512",
+                            "BIGTIFF=YES",
+                            f"NUM_THREADS={self.threads}",
+                            "PREDICTOR=3",  # Predictor para ponto flutuante
+                        ],
+                    )
+                    ds = gdal.Warp(
+                        self.output_path,
+                        self.input_path,
+                        options=warp_options,
+                        callback=self.gdal_progress_callback,
+                    )
+                else:
+                    translate_options = gdal.TranslateOptions(
+                        format="GTiff",
+                        outputSRS=self.epsg,
+                        creationOptions=[
+                            "COMPRESS=ZSTD",
+                            "TILED=YES",
+                            "BLOCKXSIZE=512",
+                            "BLOCKYSIZE=512",
+                            "BIGTIFF=YES",
+                            f"NUM_THREADS={self.threads}",
+                            "PREDICTOR=3",  # floating-point predictor (Delta sobre bytes de float)
+                        ],
+                    )
+                    self.log.emit("-> Executando gdal.Translate (Compressão ZSTD, preservando dtype)...")
+                    ds = gdal.Translate(
+                        self.output_path,
+                        self.input_path,
+                        options=translate_options,
+                        callback=self.gdal_progress_callback,
+                    )
 
                 if ds is None:
                     raise Exception(
@@ -432,7 +545,18 @@ class SmartGeoTIFFDialog(QDialog):
         layout_settings.addWidget(QLabel("EPSG de Saída:"))
         self.combo_epsg = QComboBox()
         self.combo_epsg.addItems(
-            ["EPSG:4326", "EPSG:4674", "EPSG:31982", "EPSG:31983", "EPSG:31984"]
+            [
+                "EPSG:4326",
+                "EPSG:4674",
+                "EPSG:31978",
+                "EPSG:31979",
+                "EPSG:31980",
+                "EPSG:31981",
+                "EPSG:31982",
+                "EPSG:31983",
+                "EPSG:31984",
+                "EPSG:31985",
+            ]
         )
         layout_settings.addWidget(self.combo_epsg)
         layout_settings.addSpacing(20)
@@ -670,13 +794,43 @@ class SmartGeoTIFFDialog(QDialog):
         self.group_ramp.setVisible(is_cont)
         self.spin_nodata.setValue(-9999.0 if is_cont else 0.0)
 
-    def _on_input_selected(self, path: str):
+    def _on_input_selected(self, path: str) -> None:
+        """Processa a seleção do arquivo de entrada e detecta suas características.
+
+        Detecta o tipo de dados (dtype), o intervalo de valores (min/max) e o
+        sistema de referência espacial (SRS/EPSG) do raster de entrada, atualizando
+        a interface gráfica adequadamente.
+
+        Args:
+            path: O caminho absoluto do arquivo raster de entrada.
+        """
         try:
             ds = gdal.Open(path)
             if ds is None:
                 return
             band = ds.GetRasterBand(1)
             dtype = band.DataType
+
+            # Detecção automática do EPSG do raster
+            srs = ds.GetSpatialRef()
+            if srs is not None:
+                srs_clone = srs.Clone()
+                srs_clone.AutoIdentifyEPSG()
+                epsg_code = srs_clone.GetAuthorityCode(None)
+                if epsg_code:
+                    epsg_str = f"EPSG:{epsg_code}"
+                    index = self.combo_epsg.findText(epsg_str)
+                    if index != -1:
+                        self.combo_epsg.setCurrentIndex(index)
+                        self._append_log(f"-> EPSG de entrada detectado e selecionado: {epsg_str}")
+                    else:
+                        # Adiciona o EPSG dinamicamente caso não esteja listado por padrão
+                        self.combo_epsg.addItem(epsg_str)
+                        new_index = self.combo_epsg.findText(epsg_str)
+                        self.combo_epsg.setCurrentIndex(new_index)
+                        self._append_log(
+                            f"-> EPSG de entrada detectado e adicionado dinamicamente: {epsg_str}"
+                        )
 
             # Tenta stats cacheadas primeiro; se None ou vazias, força com overviews
             stats = band.GetStatistics(True, False)  # approx=True, force=False

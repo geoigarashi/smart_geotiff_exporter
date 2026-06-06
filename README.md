@@ -28,8 +28,8 @@ O **Smart GeoTIFF Exporter** nasceu da necessidade de padronizar e acelerar a ex
 
 Ele encapsula em uma única interface dentro do QGIS todo o pipeline que antes exigia linha de comando ou scripts externos:
 
-1. **Conversão e compressão** para GeoTIFF tileado com ZSTD
-2. **Geração de overviews** (pirâmides) com resampling NEAREST
+1. **Conversão, compressão e reprojeção opcional** para GeoTIFF tileado com ZSTD via `gdal.Translate` / `gdal.Warp`
+2. **Geração de overviews** (pirâmides) com resampling NEAREST/AVERAGE
 3. **Injeção de metadados** via Raster Attribute Table (RAT) esparsa
 4. **Paleta de cores corporativa** com visualização imediata na tabela
 5. **Geração automática do arquivo `.qml`** de estilo para QGIS
@@ -44,8 +44,9 @@ Ele encapsula em uma única interface dentro do QGIS todo o pipeline que antes e
 - **Salvar/Carregar listas de classes** em `.json` para reutilização em projetos futuros
 - **Importação de paleta a partir de `.qml`** do QGIS — reaproveite estilos já criados no projeto diretamente na tabela RAT
 - **Botão "Usar camada ativa"**: importa o caminho da camada selecionada no projeto sem navegar pelo sistema de arquivos
-- **Checkbox de carregamento automático**: ao finalizar, a camada exportada entra direto no mapa com estilo aplicado
-- Suporte a múltiplos sistemas de referência: EPSG:4326, 4674, 31982, 31983, 31984
+- **Detecção automática de projeção**: identifica o EPSG original do raster e o seleciona/adiciona dinamicamente como padrão na interface gráfica
+- **Reprojeção geométrica real integrada**: realiza a transformação de coordenadas dos pixels usando `gdal.Warp` quando o EPSG destino diferir do original, adotando o resampling correto (Nearest para categórico e Bilinear para contínuo)
+- Suporte estendido a sistemas de referência nacionais: EPSG:4326, 4674 e todas as zonas UTM brasileiras do SIRGAS 2000 no hemisfério Sul (EPSG:31978 a 31985)
 - Controle de **threads** de processamento (1–32)
 - **Log em tempo real** com painel de console integrado
 - **Barra de progresso** dupla (conversão + overviews)
@@ -112,7 +113,7 @@ Após copiar, reinicie o QGIS e ative o plugin em **Plugins → Gerenciar e Inst
 1. Abra o plugin em **Raster → Smart GeoTIFF Exporter** (ou pelo botão na toolbar)
 2. **Arquivo de origem:** clique em `Procurar...` para selecionar um arquivo raster (`.vrt`, `.sdat`, `.tif`, `.img`) — ou clique em `Usar camada ativa` para usar a camada selecionada no projeto
 3. **Arquivo de destino:** clique em `Salvar como...` e defina o caminho do GeoTIFF de saída
-4. Selecione o **EPSG de saída** e o número de **Threads**
+4. Selecione o **EPSG de saída** (o EPSG do raster de origem é detectado e selecionado automaticamente por padrão; altere-o se pretender realizar a reprojeção geométrica) e o número de **Threads**
 5. Escolha o **Tema Corporativo** ou personalize a tabela de classes (adicione/remova/edite linhas)
 6. Clique em **INICIAR PROCESSAMENTO ZSTD**
 7. Acompanhe o progresso no painel de log e na barra de progresso
