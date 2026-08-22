@@ -4,7 +4,7 @@ Smart GeoTIFF Exporter
 Classe principal do plugin: registra o menu, toolbar e ação no QGIS.
 
 Autor: Clayton Igarashi <geoigarashi@gmail.com>
-Versão: 1.0.0
+Versão: 1.6.0
 """
 
 import os

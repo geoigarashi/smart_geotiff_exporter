@@ -1,0 +1,11 @@
+.venv/
+.git/
+.vscode/
+__pycache__/
+*.pyc
+.ruff_cache/
+graphify-out/
+plugins_zip/
+dados/
+resources/
+*.zip

@@ -4,11 +4,12 @@ Smart GeoTIFF Exporter - Diálogo Principal
 Interface gráfica e worker GDAL adaptados para rodar dentro do QGIS.
 
 Autor: Clayton Igarashi <geoigarashi@gmail.com>
-Versão: 1.2.0
+Versão: 1.6.0
 """
 
 import json
 import os
+from pathlib import Path
 import time
 import xml.etree.ElementTree as ET
 
@@ -36,6 +37,7 @@ from qgis.PyQt.QtWidgets import (
     QButtonGroup,
     QFrame,
     QTextBrowser,
+    QColorDialog,
 )
 from qgis.PyQt.QtCore import QThread, pyqtSignal, Qt
 from qgis.PyQt.QtGui import QColor, QPixmap
@@ -680,7 +682,7 @@ class SmartGeoTIFFDialog(QDialog):
 
         btn_save_palette = QPushButton("💾  Salvar Lista...")
         btn_save_palette.setToolTip(
-            "Salva as classes atuais da tabela em um arquivo JSON para reutilização futura."
+            "Salva as classes da tabela em arquivo de Estilo QGIS (.qml) ou Lista JSON (.json)."
         )
         btn_save_palette.clicked.connect(self._save_palette)
 
@@ -878,6 +880,7 @@ class SmartGeoTIFFDialog(QDialog):
         self._populate_table(self.combo_palette.currentText())
         self._editing = False
         self.table_palette.itemChanged.connect(self._on_item_changed)
+        self.table_palette.cellDoubleClicked.connect(self._on_table_cell_double_clicked)
 
     # ------------------------------------------------------------------
     # Slots de Interface
@@ -994,64 +997,190 @@ class SmartGeoTIFFDialog(QDialog):
         except Exception as e:
             self._append_log(f"[AVISO] Não foi possível detectar dtype: {e}")
 
-    def _populate_table(self, theme_name):
+    def _apply_cell_color(self, item: QTableWidgetItem, hex_color: str) -> None:
+        """Aplica cor de fundo e calcula o contraste ideal para o texto da célula.
+
+        Args:
+            item: Item da célula da tabela a ser estilizado.
+            hex_color: Código de cor no formato '#RRGGBB'.
+        """
+        try:
+            bg = QColor(hex_color)
+            if bg.isValid():
+                item.setBackground(bg)
+                # Cálculo de luminância para acessibilidade e alto contraste (WCAG)
+                lum = 0.299 * bg.red() + 0.587 * bg.green() + 0.114 * bg.blue()
+                item.setForeground(QColor("#000000" if lum > 128 else "#FFFFFF"))
+        except Exception:
+            pass
+
+    def _on_table_cell_double_clicked(self, row: int, column: int) -> None:
+        """Abre o seletor de cores nativo (QColorDialog) ao dar duplo clique na coluna de cor.
+
+        Args:
+            row: Índice da linha clicada.
+            column: Índice da coluna clicada.
+        """
+        if column != 2:
+            return
+        item = self.table_palette.item(row, column)
+        if item is None:
+            return
+        initial_hex = item.text().strip()
+        initial_color = (
+            QColor(initial_hex)
+            if QColor(initial_hex).isValid()
+            else QColor("#FFFFFF")
+        )
+        color = QColorDialog.getColor(initial_color, self, "Selecionar Cor da Classe")
+        if color.isValid():
+            hex_code = color.name().upper()
+            self._editing = True
+            item.setText(hex_code)
+            self._apply_cell_color(item, hex_code)
+            self._editing = False
+            self._set_combo_to_custom()
+
+    def _sort_palette_table(self, preserve_val: int | None = None) -> None:
+        """Reordena todas as linhas da tabela em ordem crescente de valor de pixel on the fly.
+
+        Args:
+            preserve_val: Valor do pixel da linha que deve permanecer selecionada após a ordenação.
+        """
+        classes: list[tuple[int, str, str]] = []
+        for r in range(self.table_palette.rowCount()):
+            item_val = self.table_palette.item(r, 0)
+            item_name = self.table_palette.item(r, 1)
+            item_hex = self.table_palette.item(r, 2)
+            if item_val and item_name and item_hex:
+                try:
+                    val = int(item_val.text().strip())
+                except ValueError:
+                    val = 0
+                name = item_name.text()
+                hex_color = item_hex.text().strip()
+                classes.append((val, name, hex_color))
+
+        # Ordenação crescente por valor de pixel
+        classes.sort(key=lambda x: x[0])
+
+        self.table_palette.blockSignals(True)
+        self.table_palette.setRowCount(0)
+        target_row = -1
+        for row, (val, name, hex_color) in enumerate(classes):
+            self.table_palette.insertRow(row)
+
+            item_v = QTableWidgetItem(str(val))
+            item_v.setData(Qt.UserRole, val)
+            self.table_palette.setItem(row, 0, item_v)
+
+            item_n = QTableWidgetItem(name)
+            self.table_palette.setItem(row, 1, item_n)
+
+            item_h = QTableWidgetItem(hex_color)
+            self._apply_cell_color(item_h, hex_color)
+            self.table_palette.setItem(row, 2, item_h)
+
+            if preserve_val is not None and val == preserve_val:
+                target_row = row
+
+        self.table_palette.blockSignals(False)
+
+        if target_row != -1:
+            self.table_palette.setCurrentCell(target_row, 0)
+
+    def _populate_table(self, theme_name: str) -> None:
+        """Popula a tabela com as classes do tema selecionado.
+
+        Args:
+            theme_name: Nome do modelo de simbologia pré-definido.
+        """
         theme_data = PALETAS.get(theme_name, {})
         self._populate_table_from_dict(theme_data)
 
-    def _populate_table_from_dict(self, classes_dict):
-        """Popula a tabela RAT a partir de um dict {int_val: {'name': str, 'hex': str}}."""
+    def _populate_table_from_dict(self, classes_dict: dict[int, dict[str, str]]) -> None:
+        """Popula a tabela RAT a partir de um dict {int_val: {'name': str, 'hex': str}} ordenado.
+
+        Args:
+            classes_dict: Dicionário contendo as classes e suas propriedades de cor e nome.
+        """
         self.table_palette.blockSignals(True)
         self.table_palette.setRowCount(0)
-        for row, (val, info) in enumerate(classes_dict.items()):
+        sorted_items = sorted(classes_dict.items(), key=lambda x: int(x[0]))
+        for row, (val, info) in enumerate(sorted_items):
+            int_val = int(val)
             self.table_palette.insertRow(row)
 
-            item_val = QTableWidgetItem(str(val))
-            item_val.setData(Qt.UserRole, int(val))
+            item_val = QTableWidgetItem(str(int_val))
+            item_val.setData(Qt.UserRole, int_val)
             self.table_palette.setItem(row, 0, item_val)
 
             self.table_palette.setItem(row, 1, QTableWidgetItem(info["name"]))
 
             item_hex = QTableWidgetItem(info["hex"])
-            # Colore a célula com a própria cor para visualização imediata
-            try:
-                bg = QColor(info["hex"])
-                item_hex.setBackground(bg)
-                # Texto preto ou branco dependendo da luminância
-                lum = 0.299 * bg.red() + 0.587 * bg.green() + 0.114 * bg.blue()
-                item_hex.setForeground(QColor("#000000" if lum > 128 else "#FFFFFF"))
-            except Exception:
-                pass
+            self._apply_cell_color(item_hex, info["hex"])
             self.table_palette.setItem(row, 2, item_hex)
         self.table_palette.blockSignals(False)
 
     def _add_table_row(self) -> None:
-        """Insere uma nova linha editável ao final da tabela."""
-        row = self.table_palette.rowCount()
-        self.table_palette.insertRow(row)
+        """Insere uma nova linha editável, sugerindo o menor valor livre e ordenando on the fly."""
+        existing_vals: set[int] = set()
+        for r in range(self.table_palette.rowCount()):
+            item = self.table_palette.item(r, 0)
+            if item:
+                try:
+                    existing_vals.add(int(item.text().strip()))
+                except ValueError:
+                    pass
 
-        # Valor padrão: próximo inteiro disponível
-        existing_vals = set()
-        for r in range(row):
-            try:
-                existing_vals.add(int(self.table_palette.item(r, 0).text()))
-            except Exception:
-                pass
-        next_val = max(existing_vals) + 1 if existing_vals else 1
+        # Encontra o menor inteiro não negativo disponível (ex: 0,1,2,5 -> sugere 3)
+        next_val = 0
+        while next_val in existing_vals:
+            next_val += 1
 
-        item_val = QTableWidgetItem(str(next_val))
-        item_val.setData(Qt.UserRole, next_val)
-        self.table_palette.setItem(row, 0, item_val)
-        self.table_palette.setItem(row, 1, QTableWidgetItem("Nova Classe"))
+        # Paleta harmoniosa para sugestão inicial de cores
+        default_colors = [
+            "#4CAF50",
+            "#2196F3",
+            "#FF9800",
+            "#9C27B0",
+            "#E91E63",
+            "#00BCD4",
+            "#8BC34A",
+            "#3F51B5",
+        ]
+        chosen_color = default_colors[next_val % len(default_colors)]
 
-        item_hex = QTableWidgetItem("#FFFFFF")
-        item_hex.setBackground(QColor("#FFFFFF"))
-        item_hex.setForeground(QColor("#000000"))
-        self.table_palette.setItem(row, 2, item_hex)
+        classes_dict: dict[int, dict[str, str]] = {}
+        for r in range(self.table_palette.rowCount()):
+            item_v = self.table_palette.item(r, 0)
+            item_n = self.table_palette.item(r, 1)
+            item_h = self.table_palette.item(r, 2)
+            if item_v and item_n and item_h:
+                try:
+                    v = int(item_v.text().strip())
+                    classes_dict[v] = {
+                        "name": item_n.text(),
+                        "hex": item_h.text().strip(),
+                    }
+                except ValueError:
+                    pass
 
-        # Entra em modo de edição no campo Nome imediatamente
-        self.table_palette.setCurrentCell(row, 1)
-        self.table_palette.editItem(self.table_palette.item(row, 1))
+        classes_dict[next_val] = {
+            "name": f"Nova Classe {next_val}",
+            "hex": chosen_color,
+        }
+
+        self._populate_table_from_dict(classes_dict)
         self._set_combo_to_custom()
+
+        # Foca e inicia a edição do nome da nova classe
+        for r in range(self.table_palette.rowCount()):
+            item = self.table_palette.item(r, 0)
+            if item and item.text().strip() == str(next_val):
+                self.table_palette.setCurrentCell(r, 1)
+                self.table_palette.editItem(self.table_palette.item(r, 1))
+                break
 
     def _remove_table_rows(self) -> None:
         """Remove as linhas selecionadas na tabela."""
@@ -1078,7 +1207,7 @@ class SmartGeoTIFFDialog(QDialog):
             self._set_combo_to_custom()
 
     def _on_item_changed(self, item: QTableWidgetItem) -> None:
-        """Valida edição na coluna 'Valor (Pixel)' e altera o combo box para 'Personalizado'.
+        """Valida edições de valor de pixel e cores HEX com ordenação e estilização em tempo real.
 
         Args:
             item: O item da tabela que foi modificado pelo usuário.
@@ -1086,7 +1215,8 @@ class SmartGeoTIFFDialog(QDialog):
         if self._editing:
             return
 
-        if item.column() == 0:
+        col = item.column()
+        if col == 0:
             text = item.text().strip()
             previous = item.data(Qt.UserRole)
             try:
@@ -1118,10 +1248,27 @@ class SmartGeoTIFFDialog(QDialog):
                         f"O valor {new_val} já existe na linha {r + 1}. Valor revertido.",
                     )
                     return
-            item.setData(Qt.UserRole, new_val)
 
-        # Se qualquer valor mudou, define como Personalizado
-        self._set_combo_to_custom()
+            item.setData(Qt.UserRole, new_val)
+            # Reordena on the fly e mantém o foco no valor editado
+            self._sort_palette_table(preserve_val=new_val)
+            self._set_combo_to_custom()
+
+        elif col == 2:
+            # Edição manual de cor HEX
+            text = item.text().strip()
+            if not text.startswith("#") and len(text) in (3, 6):
+                text = f"#{text}"
+                self._editing = True
+                item.setText(text.upper())
+                self._editing = False
+
+            if QColor(text).isValid():
+                self._apply_cell_color(item, text)
+            self._set_combo_to_custom()
+
+        elif col == 1:
+            self._set_combo_to_custom()
 
     def _set_combo_to_custom(self) -> None:
         """Altera a seleção do combo box de simbologia para 'Personalizado' sem repopular a tabela."""
@@ -1137,7 +1284,6 @@ class SmartGeoTIFFDialog(QDialog):
         Args:
             theme_name: O nome do tema selecionado (ex: 'Aptidão', 'Personalizado').
         """
-        # Se mudar para outro tema, removemos o item temporário "Lista Carregada"
         if theme_name != "Lista Carregada":
             self.combo_palette.blockSignals(True)
             index_loaded = self.combo_palette.findText("Lista Carregada")
@@ -1146,7 +1292,6 @@ class SmartGeoTIFFDialog(QDialog):
             self.combo_palette.blockSignals(False)
 
         if theme_name == "Personalizado":
-            # Limpa a tabela para o usuário iniciar do zero
             self.table_palette.blockSignals(True)
             self.table_palette.setRowCount(0)
             self.table_palette.blockSignals(False)
@@ -1158,44 +1303,137 @@ class SmartGeoTIFFDialog(QDialog):
         self._populate_table(theme_name)
 
     def _save_palette(self) -> None:
-        """Salva a paleta atual como arquivo JSON."""
+        """Salva a paleta atual nos formatos Estilo QML do QGIS ou Lista JSON."""
         try:
             palette = self._get_palette_from_table()
         except Exception as e:
             QMessageBox.critical(self, "Erro ao ler tabela", str(e))
             return
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Salvar lista de classes", "", "Lista JSON (*.json)"
-        )
-        if not path:
+
+        if not palette:
+            QMessageBox.warning(
+                self, "Tabela Vazia", "Não há classes na tabela para salvar."
+            )
             return
-        if not path.lower().endswith(".json"):
-            path += ".json"
-        name = os.path.splitext(os.path.basename(path))[0]
-        data = {
-            "name": name,
-            "classes": {str(k): v for k, v in palette.items()},
-        }
+
+        path_str, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Salvar lista de classes",
+            "",
+            "Estilo QML do QGIS (*.qml);;Lista JSON (*.json)",
+        )
+        if not path_str:
+            return
+
+        path = Path(path_str)
+        ext = path.suffix.lower()
+
+        # Determina a extensão a partir da digitação ou do filtro selecionado
+        if not ext:
+            if "json" in selected_filter.lower():
+                path = path.with_suffix(".json")
+                ext = ".json"
+            else:
+                path = path.with_suffix(".qml")
+                ext = ".qml"
+
         try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            if ext == ".qml":
+                self._save_as_qml(path, palette)
+            elif ext == ".json":
+                self._save_as_json(path, palette)
+            else:
+                if "json" in selected_filter.lower():
+                    path = path.with_suffix(".json")
+                    self._save_as_json(path, palette)
+                else:
+                    path = path.with_suffix(".qml")
+                    self._save_as_qml(path, palette)
+
             QMessageBox.information(
-                self, "Lista salva", f"{len(palette)} classe(s) salvas em:\n{path}"
+                self,
+                "Lista Salva",
+                f"{len(palette)} classe(s) salvas com sucesso em:\n{path.name}",
             )
         except Exception as e:
             QMessageBox.critical(self, "Erro ao salvar", str(e))
 
+    def _save_as_qml(self, path: Path, palette: dict[int, dict[str, str]]) -> None:
+        """Gera arquivo de estilo QML paletizado para QGIS.
+
+        Args:
+            path: Caminho de destino do arquivo .qml.
+            palette: Dicionário mapeando {valor_pixel: {'name': str, 'hex': str}}.
+        """
+        palette_entries: list[str] = []
+        for val in sorted(palette.keys()):
+            info = palette[val]
+            alpha = (
+                0
+                if (
+                    self.chk_nodata.isChecked()
+                    and val == int(self.spin_nodata.value())
+                )
+                else 255
+            )
+            label = (
+                info["name"]
+                .replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace('"', "&quot;")
+                .replace("≥", "&#8805;")
+            )
+            color = info["hex"]
+            palette_entries.append(
+                f'        <paletteEntry value="{val}" color="{color}" label="{label}" alpha="{alpha}"/>'
+            )
+
+        entries_xml = "\n".join(palette_entries)
+        qml_content = f"""<!DOCTYPE qgis PUBLIC 'http://mrcc.com/qgis.dtd' 'SYSTEM'>
+<qgis version="3.22.0" styleCategories="Symbology">
+  <pipe>
+    <provider>
+      <resampling zoomedInResamplingMethod="nearest" zoomedOutResamplingMethod="nearest" maxOversampling="2"/>
+    </provider>
+    <rasterrenderer type="paletted" opacity="1" alphaBand="-1" band="1" nodataColor="">
+      <rasterTransparency/>
+      <colorPalette>
+{entries_xml}
+      </colorPalette>
+    </rasterrenderer>
+  </pipe>
+</qgis>"""
+        path.write_text(qml_content, encoding="utf-8")
+
+    def _save_as_json(self, path: Path, palette: dict[int, dict[str, str]]) -> None:
+        """Salva a paleta como arquivo JSON estruturado.
+
+        Args:
+            path: Caminho de destino do arquivo .json.
+            palette: Dicionário mapeando {valor_pixel: {'name': str, 'hex': str}}.
+        """
+        name = path.stem
+        sorted_palette = {str(k): palette[k] for k in sorted(palette.keys())}
+        data = {
+            "name": name,
+            "classes": sorted_palette,
+        }
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
     def _load_palette(self) -> None:
         """Carrega paleta a partir de arquivo JSON ou QML."""
-        path, _ = QFileDialog.getOpenFileName(
+        path_str, _ = QFileDialog.getOpenFileName(
             self,
             "Carregar lista de classes",
             "",
             "Listas (*.json *.qml);;JSON (*.json);;QML QGIS (*.qml)",
         )
-        if not path:
+        if not path_str:
             return
-        ext = os.path.splitext(path)[1].lower()
+        path = Path(path_str)
+        ext = path.suffix.lower()
         try:
             if ext == ".json":
                 classes = self._load_from_json(path)
@@ -1228,41 +1466,74 @@ class SmartGeoTIFFDialog(QDialog):
         QMessageBox.information(
             self,
             "Lista carregada",
-            f"{len(classes)} classe(s) carregadas de:\n{os.path.basename(path)}",
+            f"{len(classes)} classe(s) carregadas de:\n{path.name}",
         )
 
-    def _load_from_json(self, path):
-        """Retorna dict {int_val: {'name': str, 'hex': str}} a partir de JSON."""
-        with open(path, encoding="utf-8") as f:
+    def _load_from_json(self, path: Path | str) -> dict[int, dict[str, str]]:
+        """Retorna dict {int_val: {'name': str, 'hex': str}} a partir de JSON.
+
+        Args:
+            path: Caminho para o arquivo .json.
+
+        Returns:
+            Dicionário ordenado das classes carregadas.
+        """
+        p = Path(path)
+        with p.open(encoding="utf-8") as f:
             data = json.load(f)
         if "classes" not in data:
             raise ValueError("Chave 'classes' não encontrada no JSON.")
-        return {int(k): v for k, v in data["classes"].items()}
+        return dict(
+            sorted(
+                {int(k): v for k, v in data["classes"].items()}.items(),
+                key=lambda x: x[0],
+            )
+        )
 
-    def _load_from_qml(self, path):
-        """Retorna dict {int_val: {'name': str, 'hex': str}} a partir de QML QGIS."""
-        tree = ET.parse(path)
-        classes = {}
+    def _load_from_qml(self, path: Path | str) -> dict[int, dict[str, str]]:
+        """Retorna dict {int_val: {'name': str, 'hex': str}} a partir de QML QGIS.
+
+        Args:
+            path: Caminho para o arquivo .qml.
+
+        Returns:
+            Dicionário ordenado das classes carregadas.
+        """
+        p = Path(path)
+        tree = ET.parse(str(p))
+        classes: dict[int, dict[str, str]] = {}
         for entry in tree.findall(".//paletteEntry"):
             val = int(entry.get("value", 0))
             color = entry.get("color", "#CCCCCC")
             label = entry.get("label", f"Classe {val}")
             classes[val] = {"name": label, "hex": color}
-        return classes
+        return dict(sorted(classes.items(), key=lambda x: x[0]))
 
-    def _get_palette_from_table(self):
-        custom_palette = {}
+    def _get_palette_from_table(self) -> dict[int, dict[str, str]]:
+        """Lê e valida todas as classes da tabela.
+
+        Returns:
+            Dicionário ordenado {valor_pixel: {'name': str, 'hex': str}}.
+        """
+        custom_palette: dict[int, dict[str, str]] = {}
         for row in range(self.table_palette.rowCount()):
             try:
-                val = int(self.table_palette.item(row, 0).text())
-                name = self.table_palette.item(row, 1).text()
-                hex_color = self.table_palette.item(row, 2).text()
+                item_v = self.table_palette.item(row, 0)
+                item_n = self.table_palette.item(row, 1)
+                item_h = self.table_palette.item(row, 2)
+                if not item_v or not item_n or not item_h:
+                    continue
+                val = int(item_v.text().strip())
+                name = item_n.text().strip()
+                hex_color = item_h.text().strip()
                 if not hex_color.startswith("#") or len(hex_color) != 7:
-                    raise ValueError(f"Cor HEX inválida na linha {row + 1}")
+                    raise ValueError(
+                        f"Cor HEX '{hex_color}' inválida na linha {row + 1} (use formato #RRGGBB)."
+                    )
                 custom_palette[val] = {"name": name, "hex": hex_color}
             except Exception as e:
-                raise Exception(f"Erro na leitura da tabela de cores: {e}")
-        return custom_palette
+                raise Exception(f"Erro na leitura da tabela de classes: {e}")
+        return dict(sorted(custom_palette.items(), key=lambda x: x[0]))
 
     def _append_log(self, text):
         self.log_viewer.append(text)
