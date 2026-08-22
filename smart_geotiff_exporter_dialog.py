@@ -4,16 +4,18 @@ Smart GeoTIFF Exporter - Diálogo Principal
 Interface gráfica e worker GDAL adaptados para rodar dentro do QGIS.
 
 Autor: Clayton Igarashi <geoigarashi@gmail.com>
-Versão: 1.2.0
+Versão: 1.6.0
 """
 
 import json
 import os
+from pathlib import Path
 import time
 import xml.etree.ElementTree as ET
 
 from qgis.PyQt.QtWidgets import (
     QDialog,
+    QWidget,
     QVBoxLayout,
     QHBoxLayout,
     QPushButton,
@@ -33,9 +35,12 @@ from qgis.PyQt.QtWidgets import (
     QCheckBox,
     QRadioButton,
     QButtonGroup,
+    QFrame,
+    QTextBrowser,
+    QColorDialog,
 )
 from qgis.PyQt.QtCore import QThread, pyqtSignal, Qt
-from qgis.PyQt.QtGui import QColor
+from qgis.PyQt.QtGui import QColor, QPixmap
 
 from osgeo import gdal
 
@@ -143,9 +148,33 @@ class GdalWorker(QThread):
     log = pyqtSignal(str)
     finished = pyqtSignal(bool, str)
 
-    def __init__(self, input_path, output_path, epsg, threads, custom_palette,
-                 nodata_value=None, mode="categorical",
-                 color_ramp=None, raster_min=None, raster_max=None):
+    def __init__(
+        self,
+        input_path: str,
+        output_path: str,
+        epsg: str,
+        threads: int,
+        custom_palette: dict[int, dict[str, str]],
+        nodata_value: float | None = None,
+        mode: str = "categorical",
+        color_ramp: str | None = None,
+        raster_min: float | None = None,
+        raster_max: float | None = None,
+    ) -> None:
+        """Inicializa o trabalhador GDAL.
+
+        Args:
+            input_path: Caminho do arquivo raster de entrada.
+            output_path: Caminho do arquivo raster de saída (GeoTIFF).
+            epsg: Código EPSG de destino (ex: 'EPSG:31983').
+            threads: Quantidade de threads para paralelismo da compressão.
+            custom_palette: Dicionário mapeando pixel inteiro para dicionário de cores/nomes.
+            nodata_value: Valor opcional a ser definido como NoData.
+            mode: Modo de exportação ('categorical' ou 'continuous').
+            color_ramp: Nome da rampa de cores contínua (ex: 'Spectral').
+            raster_min: Valor mínimo do raster (necessário para rampa contínua).
+            raster_max: Valor máximo do raster (necessário para rampa contínua).
+        """
         super().__init__()
         self.input_path = input_path
         self.output_path = output_path
@@ -157,40 +186,117 @@ class GdalWorker(QThread):
         self.color_ramp = color_ramp
         self.raster_min = raster_min
         self.raster_max = raster_max
+        self.is_cancelled = False
 
-    def gdal_progress_callback(self, complete, message, user_data):
+    def gdal_progress_callback(self, complete: float, message: str, user_data: None) -> int:
+        """Callback do GDAL para atualização de progresso.
+
+        Verifica se houve cancelamento do processo por parte do usuário. Em caso positivo,
+        retorna 0 para que a execução do GDAL seja imediatamente interrompida.
+
+        Args:
+            complete: Taxa de conclusão de 0.0 a 1.0.
+            message: Mensagem de progresso do GDAL.
+            user_data: Dados de usuário opcionais passados pelo GDAL.
+
+        Returns:
+            Retorna 1 para continuar o processamento ou 0 para cancelar.
+        """
+        if self.is_cancelled:
+            self.log.emit("[CANCELANDO] Interrupção do processo solicitada pelo usuário...")
+            return 0
         self.progress.emit(int(complete * 100))
         return 1
 
-    def run(self):
+    def cancel(self) -> None:
+        """Solicita o cancelamento imediato da execução da tarefa."""
+        self.is_cancelled = True
+
+    def run(self) -> None:
+        """Executa a exportação do raster com compressão ZSTD e pirâmides.
+
+        Determina o EPSG original do raster e decide se deve utilizar `gdal.Translate`
+        (caso o EPSG original seja igual ao EPSG de destino) ou `gdal.Warp` (caso seja
+        necessária a reprojeção geométrica dos pixels).
+        """
         try:
             start_time = time.time()
             self.log.emit(f"Iniciando leitura de: {self.input_path}")
 
-            if self.mode == "categorical":
-                # ── Modo Categórico (comportamento original intacto) ──────────────
-                translate_options = gdal.TranslateOptions(
-                    format="GTiff",
-                    outputType=gdal.GDT_Byte,
-                    outputSRS=self.epsg,
-                    creationOptions=[
-                        "COMPRESS=ZSTD",
-                        "TILED=YES",
-                        "BLOCKXSIZE=512",
-                        "BLOCKYSIZE=512",
-                        "BIGTIFF=YES",
-                        f"NUM_THREADS={self.threads}",
-                        "PREDICTOR=1",
-                    ],
+            # Detecção do EPSG original do raster de entrada
+            ds_in = gdal.Open(self.input_path)
+            if ds_in is None:
+                raise Exception(f"Não foi possível abrir o arquivo de entrada: {self.input_path}")
+
+            srs_in = ds_in.GetSpatialRef()
+            input_epsg = None
+            if srs_in is not None:
+                srs_in_clone = srs_in.Clone()
+                srs_in_clone.AutoIdentifyEPSG()
+                input_epsg_code = srs_in_clone.GetAuthorityCode(None)
+                if input_epsg_code:
+                    input_epsg = f"EPSG:{input_epsg_code}"
+
+            ds_in = None  # Fecha o dataset temporário de leitura
+
+            needs_reprojection = False
+            if input_epsg and self.epsg:
+                if input_epsg.strip().upper() != self.epsg.strip().upper():
+                    needs_reprojection = True
+                    self.log.emit(f"-> Reprojeção necessária: {input_epsg} para {self.epsg}")
+            else:
+                self.log.emit(
+                    "-> Projeção original não detectada ou indefinida. Preservando coordenadas."
                 )
 
-                self.log.emit("-> Executando gdal.Translate (Conversão e Compressão)...")
-                ds = gdal.Translate(
-                    self.output_path,
-                    self.input_path,
-                    options=translate_options,
-                    callback=self.gdal_progress_callback,
-                )
+            if self.mode == "categorical":
+                # ── Modo Categórico (comportamento original preservado ou reprojetado) ──────────────
+                if needs_reprojection:
+                    self.log.emit("-> Executando gdal.Warp (Reprojeção geométrica)...")
+                    warp_options = gdal.WarpOptions(
+                        format="GTiff",
+                        outputType=gdal.GDT_Byte,
+                        srcSRS=input_epsg,
+                        dstSRS=self.epsg,
+                        resampleAlg=gdal.GRIORA_NearestNeighbour,  # Preserva classes categóricas
+                        callback=self.gdal_progress_callback,
+                        creationOptions=[
+                            "COMPRESS=ZSTD",
+                            "TILED=YES",
+                            "BLOCKXSIZE=512",
+                            "BLOCKYSIZE=512",
+                            "BIGTIFF=YES",
+                            f"NUM_THREADS={self.threads}",
+                            "PREDICTOR=1",
+                        ],
+                    )
+                    ds = gdal.Warp(
+                        self.output_path,
+                        self.input_path,
+                        options=warp_options,
+                    )
+                else:
+                    translate_options = gdal.TranslateOptions(
+                        format="GTiff",
+                        outputType=gdal.GDT_Byte,
+                        outputSRS=self.epsg,
+                        creationOptions=[
+                            "COMPRESS=ZSTD",
+                            "TILED=YES",
+                            "BLOCKXSIZE=512",
+                            "BLOCKYSIZE=512",
+                            "BIGTIFF=YES",
+                            f"NUM_THREADS={self.threads}",
+                            "PREDICTOR=1",
+                        ],
+                    )
+                    self.log.emit("-> Executando gdal.Translate (Conversão e Compressão)...")
+                    ds = gdal.Translate(
+                        self.output_path,
+                        self.input_path,
+                        options=translate_options,
+                        callback=self.gdal_progress_callback,
+                    )
 
                 if ds is None:
                     raise Exception(
@@ -277,27 +383,50 @@ class GdalWorker(QThread):
 
             else:
                 # ── Modo Contínuo (Float32/Int alto, preserva dtype) ─────────────
-                translate_options = gdal.TranslateOptions(
-                    format="GTiff",
-                    outputSRS=self.epsg,
-                    creationOptions=[
-                        "COMPRESS=ZSTD",
-                        "TILED=YES",
-                        "BLOCKXSIZE=512",
-                        "BLOCKYSIZE=512",
-                        "BIGTIFF=YES",
-                        f"NUM_THREADS={self.threads}",
-                        "PREDICTOR=3",  # floating-point predictor (Delta sobre bytes de float)
-                    ],
-                )
-
-                self.log.emit("-> Executando gdal.Translate (Compressão ZSTD, preservando dtype)...")
-                ds = gdal.Translate(
-                    self.output_path,
-                    self.input_path,
-                    options=translate_options,
-                    callback=self.gdal_progress_callback,
-                )
+                if needs_reprojection:
+                    self.log.emit("-> Executando gdal.Warp (Reprojeção geométrica)...")
+                    warp_options = gdal.WarpOptions(
+                        format="GTiff",
+                        srcSRS=input_epsg,
+                        dstSRS=self.epsg,
+                        resampleAlg=gdal.GRIORA_Bilinear,  # Resampling suave para valores reais
+                        callback=self.gdal_progress_callback,
+                        creationOptions=[
+                            "COMPRESS=ZSTD",
+                            "TILED=YES",
+                            "BLOCKXSIZE=512",
+                            "BLOCKYSIZE=512",
+                            "BIGTIFF=YES",
+                            f"NUM_THREADS={self.threads}",
+                            "PREDICTOR=3",  # Predictor para ponto flutuante
+                        ],
+                    )
+                    ds = gdal.Warp(
+                        self.output_path,
+                        self.input_path,
+                        options=warp_options,
+                    )
+                else:
+                    translate_options = gdal.TranslateOptions(
+                        format="GTiff",
+                        outputSRS=self.epsg,
+                        creationOptions=[
+                            "COMPRESS=ZSTD",
+                            "TILED=YES",
+                            "BLOCKXSIZE=512",
+                            "BLOCKYSIZE=512",
+                            "BIGTIFF=YES",
+                            f"NUM_THREADS={self.threads}",
+                            "PREDICTOR=3",  # floating-point predictor (Delta sobre bytes de float)
+                        ],
+                    )
+                    self.log.emit("-> Executando gdal.Translate (Compressão ZSTD, preservando dtype)...")
+                    ds = gdal.Translate(
+                        self.output_path,
+                        self.input_path,
+                        options=translate_options,
+                        callback=self.gdal_progress_callback,
+                    )
 
                 if ds is None:
                     raise Exception(
@@ -340,8 +469,12 @@ class GdalWorker(QThread):
             self.finished.emit(True, msg_final)
 
         except Exception as e:
-            self.log.emit(f"[ERRO CRÍTICO] {str(e)}")
-            self.finished.emit(False, str(e))
+            if self.is_cancelled:
+                self.log.emit("[PROCESSAMENTO CANCELADO] O processo foi abortado com sucesso.")
+                self.finished.emit(False, "Processamento cancelado pelo usuário.")
+            else:
+                self.log.emit(f"[ERRO CRÍTICO] {str(e)}")
+                self.finished.emit(False, str(e))
 
 
 # ---------------------------------------------------------------------------
@@ -361,7 +494,7 @@ class SmartGeoTIFFDialog(QDialog):
         self._detected_max = None
 
         self.setWindowTitle("Smart GeoTIFF Exporter")
-        self.setMinimumSize(820, 780)
+        self.setMinimumSize(1080, 780)
         # Mantém a janela sempre visível mesmo ao clicar fora
         self.setWindowFlags(self.windowFlags() | Qt.Window)
         self._init_ui()
@@ -369,8 +502,13 @@ class SmartGeoTIFFDialog(QDialog):
     # ------------------------------------------------------------------
     # Construção da Interface
     # ------------------------------------------------------------------
-    def _init_ui(self):
+    def _init_ui(self) -> None:
+        """Cria e organiza todos os elementos da interface gráfica (PyQt)."""
         main_layout = QVBoxLayout(self)
+
+        # Layout horizontal principal para dividir controles (esquerda) e ajuda (direita)
+        workspace_layout = QHBoxLayout()
+        left_layout = QVBoxLayout()
 
         # ── 1. Arquivos ────────────────────────────────────────────────
         group_files = QGroupBox("Arquivos e Diretórios")
@@ -407,7 +545,7 @@ class SmartGeoTIFFDialog(QDialog):
         layout_files.addLayout(layout_input)
         layout_files.addLayout(layout_output)
         group_files.setLayout(layout_files)
-        main_layout.addWidget(group_files)
+        left_layout.addWidget(group_files)
 
         # ── 2. Parâmetros GDAL ─────────────────────────────────────────
         group_settings = QGroupBox("Parâmetros GDAL")
@@ -432,7 +570,18 @@ class SmartGeoTIFFDialog(QDialog):
         layout_settings.addWidget(QLabel("EPSG de Saída:"))
         self.combo_epsg = QComboBox()
         self.combo_epsg.addItems(
-            ["EPSG:4326", "EPSG:4674", "EPSG:31982", "EPSG:31983", "EPSG:31984"]
+            [
+                "EPSG:4674 - SIRGAS 2000 (Geográfico)",
+                "EPSG:4326 - WGS 84 (Geográfico)",
+                "EPSG:31978 - SIRGAS 2000 / UTM 18S",
+                "EPSG:31979 - SIRGAS 2000 / UTM 19S",
+                "EPSG:31980 - SIRGAS 2000 / UTM 20S",
+                "EPSG:31981 - SIRGAS 2000 / UTM 21S",
+                "EPSG:31982 - SIRGAS 2000 / UTM 22S",
+                "EPSG:31983 - SIRGAS 2000 / UTM 23S",
+                "EPSG:31984 - SIRGAS 2000 / UTM 24S",
+                "EPSG:31985 - SIRGAS 2000 / UTM 25S",
+            ]
         )
         layout_settings.addWidget(self.combo_epsg)
         layout_settings.addSpacing(20)
@@ -472,17 +621,18 @@ class SmartGeoTIFFDialog(QDialog):
         layout_settings.addStretch()
         layout_settings_v.addLayout(layout_settings)
         group_settings.setLayout(layout_settings_v)
-        main_layout.addWidget(group_settings)
+        left_layout.addWidget(group_settings)
 
         # ── 3. Paleta e RAT ───────────────────────────────────────────
-        self.group_palette = QGroupBox("Metadados, Classes e Cores (RAT)")
+        self.group_palette = QGroupBox("Metadados e Simbologia (RAT)")
         layout_palette = QVBoxLayout()
 
         layout_combo_palette = QHBoxLayout()
-        layout_combo_palette.addWidget(QLabel("Tema Corporativo:"))
+        layout_combo_palette.addWidget(QLabel("Modelo de Simbologia:"))
         self.combo_palette = QComboBox()
-        self.combo_palette.addItems(list(PALETAS.keys()))
-        self.combo_palette.currentTextChanged.connect(self._populate_table)
+        self.combo_palette.setMinimumWidth(160)
+        self.combo_palette.addItems(list(PALETAS.keys()) + ["Personalizado"])
+        self.combo_palette.currentTextChanged.connect(self._on_theme_changed)
         layout_combo_palette.addWidget(self.combo_palette)
         layout_combo_palette.addStretch()
         layout_palette.addLayout(layout_combo_palette)
@@ -527,12 +677,12 @@ class SmartGeoTIFFDialog(QDialog):
             "background-color: #E65100; color: white; font-weight: bold;"
         )
         btn_reset_table.clicked.connect(
-            lambda: self._populate_table(self.combo_palette.currentText())
+            lambda: self._on_theme_changed(self.combo_palette.currentText())
         )
 
         btn_save_palette = QPushButton("💾  Salvar Lista...")
         btn_save_palette.setToolTip(
-            "Salva as classes atuais da tabela em um arquivo JSON para reutilização futura."
+            "Salva as classes da tabela em arquivo de Estilo QGIS (.qml) ou Lista JSON (.json)."
         )
         btn_save_palette.clicked.connect(self._save_palette)
 
@@ -553,7 +703,7 @@ class SmartGeoTIFFDialog(QDialog):
         layout_palette.addLayout(layout_table_btns)
 
         self.group_palette.setLayout(layout_palette)
-        main_layout.addWidget(self.group_palette, 1)
+        left_layout.addWidget(self.group_palette, 1)
 
         # ── 3b. Rampa de Cores (Modo Contínuo) ────────────────────────
         self.group_ramp = QGroupBox("Rampa de Cores (Modo Contínuo)")
@@ -571,9 +721,105 @@ class SmartGeoTIFFDialog(QDialog):
         layout_ramp.addLayout(layout_ramp_row)
         self.group_ramp.setLayout(layout_ramp)
         self.group_ramp.setVisible(False)
-        main_layout.addWidget(self.group_ramp)
+        left_layout.addWidget(self.group_ramp)
+
+        # ── Painel de Ajuda / Tutorial (Lado Direito) ─────────────────
+        right_layout = QVBoxLayout()
+
+        # Cabeçalho do painel
+        lbl_title = QLabel("Smart GeoTIFF Exporter")
+        lbl_title.setStyleSheet("font-weight: bold; font-size: 14px; color: #1565C0;")
+        lbl_title.setAlignment(Qt.AlignCenter)
+        right_layout.addWidget(lbl_title)
+
+        # Logos lado a lado
+        layout_logos = QHBoxLayout()
+        plugin_dir = os.path.dirname(__file__)
+        icon_path = os.path.normpath(os.path.join(plugin_dir, "icon.png"))
+        logo_path = os.path.normpath(os.path.join(plugin_dir, "Logo-GEO-HQ.svg"))
+
+        lbl_icon = QLabel()
+        if os.path.exists(icon_path):
+            pix_icon = QPixmap(icon_path)
+            lbl_icon.setPixmap(pix_icon.scaled(60, 60, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        lbl_icon.setAlignment(Qt.AlignCenter)
+
+        lbl_logo = QLabel()
+        if os.path.exists(logo_path):
+            pix_logo = QPixmap(logo_path)
+            lbl_logo.setPixmap(pix_logo.scaled(100, 60, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        lbl_logo.setAlignment(Qt.AlignCenter)
+
+        layout_logos.addWidget(lbl_icon)
+        layout_logos.addWidget(lbl_logo)
+        right_layout.addLayout(layout_logos)
+
+        # Tutorial em HTML
+        help_browser = QTextBrowser()
+        help_browser.setReadOnly(True)
+        help_browser.setOpenExternalLinks(True)
+        help_browser.setStyleSheet(
+            "background-color: #f9f9f9; border: 1px solid #dcdcdc; border-radius: 4px; padding: 4px;"
+        )
+
+        html_help = """
+        <html>
+        <head>
+        <style>
+            body { font-family: 'Segoe UI', Arial, sans-serif; font-size: 11px; color: #333333; line-height: 1.4; }
+            h3 { color: #1565C0; font-size: 12px; margin-top: 8px; margin-bottom: 4px; border-bottom: 1px solid #dcdcdc; padding-bottom: 2px; }
+            ol, ul { padding-left: 15px; margin-top: 4px; margin-bottom: 4px; }
+            li { margin-bottom: 3px; }
+            b { color: #0d47a1; }
+        </style>
+        </head>
+        <body>
+        <h3>Passo a Passo</h3>
+        <ol>
+            <li><b>Origem dos dados:</b> Selecione o arquivo raster (.tif, .vrt, .sdat, .img) ou clique em "Usar camada ativa". O plugin detectará o tipo e o EPSG original.</li>
+            <li><b>Destino:</b> Defina em "Salvar como..." o caminho do GeoTIFF de saída.</li>
+            <li><b>Projeção & CPU:</b> Escolha o EPSG de destino. Se for diferente da origem, o plugin fará a reprojeção geométrica via <i>gdal.Warp</i>. Ajuste o número de threads (CPU).</li>
+            <li><b>Simbologia e Classes:</b>
+                <ul>
+                    <li><b>Categórico:</b> Para dados discretos e classes. Cria tabela RAT e arquivo QML paletizado.</li>
+                    <li><b>Contínuo:</b> Para rasters de valores reais (altitude, declividade contínua). Gera estilo QML pseudocolor com rampa.</li>
+                </ul>
+            </li>
+            <li><b>Processar:</b> Clique em "Iniciar Processamento" e acompanhe pelo console de logs.</li>
+        </ol>
+        <h3>Dicas Úteis</h3>
+        <ul>
+            <li>A compressão <b>ZSTD</b> combinada com particionamento em blocos (TILED=YES) reduz consideravelmente o tamanho do arquivo sem perda de dados e acelera a renderização no QGIS.</li>
+            <li><b>Preditor FP (3):</b> No modo contínuo, o plugin ativa o preditor de ponto flutuante, reorganizando os bytes para obter compressões superiores.</li>
+            <li><b>Cancelamento:</b> Se precisar interromper o processamento, clique em CANCELAR. O processo é abortado com segurança no motor do GDAL.</li>
+        </ul>
+        </body>
+        </html>
+        """
+        help_browser.setHtml(html_help)
+        right_layout.addWidget(help_browser)
+
+        # Limita a largura do painel direito
+        right_widget = QWidget()
+        right_widget.setLayout(right_layout)
+        right_widget.setFixedWidth(280)
+
+        # Montagem do layout horizontal de trabalho
+        workspace_layout.addLayout(left_layout)
+
+        # Divisor vertical entre os dois painéis
+        divider = QFrame()
+        divider.setFrameShape(QFrame.VLine)
+        divider.setFrameShadow(QFrame.Sunken)
+        workspace_layout.addWidget(divider)
+        workspace_layout.addWidget(right_widget)
+
+        # Adiciona o workspace no topo do layout principal
+        main_layout.addLayout(workspace_layout)
 
         # ── 4. Ações ──────────────────────────────────────────────────
+        layout_actions = QHBoxLayout()
+
         self.btn_process = QPushButton("INICIAR PROCESSAMENTO ZSTD")
         self.btn_process.setMinimumHeight(42)
         self.btn_process.setStyleSheet(
@@ -581,7 +827,19 @@ class SmartGeoTIFFDialog(QDialog):
             "font-weight: bold; font-size: 14px;"
         )
         self.btn_process.clicked.connect(self._start_processing)
-        main_layout.addWidget(self.btn_process)
+
+        self.btn_cancel = QPushButton("CANCELAR")
+        self.btn_cancel.setMinimumHeight(42)
+        self.btn_cancel.setStyleSheet(
+            "background-color: #B71C1C; color: white; "
+            "font-weight: bold; font-size: 14px;"
+        )
+        self.btn_cancel.setEnabled(False)
+        self.btn_cancel.clicked.connect(self._cancel_processing)
+
+        layout_actions.addWidget(self.btn_process, 3)
+        layout_actions.addWidget(self.btn_cancel, 1)
+        main_layout.addLayout(layout_actions)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setValue(0)
@@ -622,6 +880,7 @@ class SmartGeoTIFFDialog(QDialog):
         self._populate_table(self.combo_palette.currentText())
         self._editing = False
         self.table_palette.itemChanged.connect(self._on_item_changed)
+        self.table_palette.cellDoubleClicked.connect(self._on_table_cell_double_clicked)
 
     # ------------------------------------------------------------------
     # Slots de Interface
@@ -670,13 +929,53 @@ class SmartGeoTIFFDialog(QDialog):
         self.group_ramp.setVisible(is_cont)
         self.spin_nodata.setValue(-9999.0 if is_cont else 0.0)
 
-    def _on_input_selected(self, path: str):
+    def _on_input_selected(self, path: str) -> None:
+        """Processa a seleção do arquivo de entrada e detecta suas características.
+
+        Detecta o tipo de dados (dtype), o intervalo de valores (min/max) e o
+        sistema de referência espacial (SRS/EPSG) do raster de entrada, atualizando
+        a interface gráfica adequadamente.
+
+        Args:
+            path: O caminho absoluto do arquivo raster de entrada.
+        """
         try:
             ds = gdal.Open(path)
             if ds is None:
                 return
             band = ds.GetRasterBand(1)
             dtype = band.DataType
+
+            # Detecção automática do EPSG do raster
+            srs = ds.GetSpatialRef()
+            if srs is not None:
+                srs_clone = srs.Clone()
+                srs_clone.AutoIdentifyEPSG()
+                epsg_code_val = srs_clone.GetAuthorityCode(None)
+                if epsg_code_val:
+                    epsg_str = f"EPSG:{epsg_code_val}"
+                    index = -1
+                    for i in range(self.combo_epsg.count()):
+                        item_text = self.combo_epsg.itemText(i)
+                        if item_text.startswith(epsg_str):
+                            index = i
+                            break
+
+                    if index != -1:
+                        self.combo_epsg.setCurrentIndex(index)
+                        self._append_log(
+                            f"-> EPSG de entrada detectado e selecionado: {self.combo_epsg.itemText(index)}"
+                        )
+                    else:
+                        # Adiciona o EPSG dinamicamente caso não esteja listado por padrão
+                        srs_name = srs_clone.GetName() or "Projeção Personalizada"
+                        dynamic_text = f"{epsg_str} - {srs_name}"
+                        self.combo_epsg.addItem(dynamic_text)
+                        new_index = self.combo_epsg.findText(dynamic_text)
+                        self.combo_epsg.setCurrentIndex(new_index)
+                        self._append_log(
+                            f"-> EPSG de entrada detectado e adicionado dinamicamente: {dynamic_text}"
+                        )
 
             # Tenta stats cacheadas primeiro; se None ou vazias, força com overviews
             stats = band.GetStatistics(True, False)  # approx=True, force=False
@@ -698,65 +997,192 @@ class SmartGeoTIFFDialog(QDialog):
         except Exception as e:
             self._append_log(f"[AVISO] Não foi possível detectar dtype: {e}")
 
-    def _populate_table(self, theme_name):
+    def _apply_cell_color(self, item: QTableWidgetItem, hex_color: str) -> None:
+        """Aplica cor de fundo e calcula o contraste ideal para o texto da célula.
+
+        Args:
+            item: Item da célula da tabela a ser estilizado.
+            hex_color: Código de cor no formato '#RRGGBB'.
+        """
+        try:
+            bg = QColor(hex_color)
+            if bg.isValid():
+                item.setBackground(bg)
+                # Cálculo de luminância para acessibilidade e alto contraste (WCAG)
+                lum = 0.299 * bg.red() + 0.587 * bg.green() + 0.114 * bg.blue()
+                item.setForeground(QColor("#000000" if lum > 128 else "#FFFFFF"))
+        except Exception:
+            pass
+
+    def _on_table_cell_double_clicked(self, row: int, column: int) -> None:
+        """Abre o seletor de cores nativo (QColorDialog) ao dar duplo clique na coluna de cor.
+
+        Args:
+            row: Índice da linha clicada.
+            column: Índice da coluna clicada.
+        """
+        if column != 2:
+            return
+        item = self.table_palette.item(row, column)
+        if item is None:
+            return
+        initial_hex = item.text().strip()
+        initial_color = (
+            QColor(initial_hex)
+            if QColor(initial_hex).isValid()
+            else QColor("#FFFFFF")
+        )
+        color = QColorDialog.getColor(initial_color, self, "Selecionar Cor da Classe")
+        if color.isValid():
+            hex_code = color.name().upper()
+            self._editing = True
+            item.setText(hex_code)
+            self._apply_cell_color(item, hex_code)
+            self._editing = False
+            self._set_combo_to_custom()
+
+    def _sort_palette_table(self, preserve_val: int | None = None) -> None:
+        """Reordena todas as linhas da tabela em ordem crescente de valor de pixel on the fly.
+
+        Args:
+            preserve_val: Valor do pixel da linha que deve permanecer selecionada após a ordenação.
+        """
+        classes: list[tuple[int, str, str]] = []
+        for r in range(self.table_palette.rowCount()):
+            item_val = self.table_palette.item(r, 0)
+            item_name = self.table_palette.item(r, 1)
+            item_hex = self.table_palette.item(r, 2)
+            if item_val and item_name and item_hex:
+                try:
+                    val = int(item_val.text().strip())
+                except ValueError:
+                    val = 0
+                name = item_name.text()
+                hex_color = item_hex.text().strip()
+                classes.append((val, name, hex_color))
+
+        # Ordenação crescente por valor de pixel
+        classes.sort(key=lambda x: x[0])
+
+        self.table_palette.blockSignals(True)
+        self.table_palette.setRowCount(0)
+        target_row = -1
+        for row, (val, name, hex_color) in enumerate(classes):
+            self.table_palette.insertRow(row)
+
+            item_v = QTableWidgetItem(str(val))
+            item_v.setData(Qt.UserRole, val)
+            self.table_palette.setItem(row, 0, item_v)
+
+            item_n = QTableWidgetItem(name)
+            self.table_palette.setItem(row, 1, item_n)
+
+            item_h = QTableWidgetItem(hex_color)
+            self._apply_cell_color(item_h, hex_color)
+            self.table_palette.setItem(row, 2, item_h)
+
+            if preserve_val is not None and val == preserve_val:
+                target_row = row
+
+        self.table_palette.blockSignals(False)
+
+        if target_row != -1:
+            self.table_palette.setCurrentCell(target_row, 0)
+
+    def _populate_table(self, theme_name: str) -> None:
+        """Popula a tabela com as classes do tema selecionado.
+
+        Args:
+            theme_name: Nome do modelo de simbologia pré-definido.
+        """
         theme_data = PALETAS.get(theme_name, {})
         self._populate_table_from_dict(theme_data)
 
-    def _populate_table_from_dict(self, classes_dict):
-        """Popula a tabela RAT a partir de um dict {int_val: {'name': str, 'hex': str}}."""
+    def _populate_table_from_dict(self, classes_dict: dict[int, dict[str, str]]) -> None:
+        """Popula a tabela RAT a partir de um dict {int_val: {'name': str, 'hex': str}} ordenado.
+
+        Args:
+            classes_dict: Dicionário contendo as classes e suas propriedades de cor e nome.
+        """
         self.table_palette.blockSignals(True)
         self.table_palette.setRowCount(0)
-        for row, (val, info) in enumerate(classes_dict.items()):
+        sorted_items = sorted(classes_dict.items(), key=lambda x: int(x[0]))
+        for row, (val, info) in enumerate(sorted_items):
+            int_val = int(val)
             self.table_palette.insertRow(row)
 
-            item_val = QTableWidgetItem(str(val))
-            item_val.setData(Qt.UserRole, int(val))
+            item_val = QTableWidgetItem(str(int_val))
+            item_val.setData(Qt.UserRole, int_val)
             self.table_palette.setItem(row, 0, item_val)
 
             self.table_palette.setItem(row, 1, QTableWidgetItem(info["name"]))
 
             item_hex = QTableWidgetItem(info["hex"])
-            # Colore a célula com a própria cor para visualização imediata
-            try:
-                bg = QColor(info["hex"])
-                item_hex.setBackground(bg)
-                # Texto preto ou branco dependendo da luminância
-                lum = 0.299 * bg.red() + 0.587 * bg.green() + 0.114 * bg.blue()
-                item_hex.setForeground(QColor("#000000" if lum > 128 else "#FFFFFF"))
-            except Exception:
-                pass
+            self._apply_cell_color(item_hex, info["hex"])
             self.table_palette.setItem(row, 2, item_hex)
         self.table_palette.blockSignals(False)
 
-    def _add_table_row(self):
-        """Insere uma nova linha editável ao final da tabela."""
-        row = self.table_palette.rowCount()
-        self.table_palette.insertRow(row)
+    def _add_table_row(self) -> None:
+        """Insere uma nova linha editável, sugerindo o menor valor livre e ordenando on the fly."""
+        existing_vals: set[int] = set()
+        for r in range(self.table_palette.rowCount()):
+            item = self.table_palette.item(r, 0)
+            if item:
+                try:
+                    existing_vals.add(int(item.text().strip()))
+                except ValueError:
+                    pass
 
-        # Valor padrão: próximo inteiro disponível
-        existing_vals = set()
-        for r in range(row):
-            try:
-                existing_vals.add(int(self.table_palette.item(r, 0).text()))
-            except Exception:
-                pass
-        next_val = max(existing_vals) + 1 if existing_vals else 1
+        # Encontra o menor inteiro não negativo disponível (ex: 0,1,2,5 -> sugere 3)
+        next_val = 0
+        while next_val in existing_vals:
+            next_val += 1
 
-        item_val = QTableWidgetItem(str(next_val))
-        item_val.setData(Qt.UserRole, next_val)
-        self.table_palette.setItem(row, 0, item_val)
-        self.table_palette.setItem(row, 1, QTableWidgetItem("Nova Classe"))
+        # Paleta harmoniosa para sugestão inicial de cores
+        default_colors = [
+            "#4CAF50",
+            "#2196F3",
+            "#FF9800",
+            "#9C27B0",
+            "#E91E63",
+            "#00BCD4",
+            "#8BC34A",
+            "#3F51B5",
+        ]
+        chosen_color = default_colors[next_val % len(default_colors)]
 
-        item_hex = QTableWidgetItem("#FFFFFF")
-        item_hex.setBackground(QColor("#FFFFFF"))
-        item_hex.setForeground(QColor("#000000"))
-        self.table_palette.setItem(row, 2, item_hex)
+        classes_dict: dict[int, dict[str, str]] = {}
+        for r in range(self.table_palette.rowCount()):
+            item_v = self.table_palette.item(r, 0)
+            item_n = self.table_palette.item(r, 1)
+            item_h = self.table_palette.item(r, 2)
+            if item_v and item_n and item_h:
+                try:
+                    v = int(item_v.text().strip())
+                    classes_dict[v] = {
+                        "name": item_n.text(),
+                        "hex": item_h.text().strip(),
+                    }
+                except ValueError:
+                    pass
 
-        # Entra em modo de edição no campo Nome imediatamente
-        self.table_palette.setCurrentCell(row, 1)
-        self.table_palette.editItem(self.table_palette.item(row, 1))
+        classes_dict[next_val] = {
+            "name": f"Nova Classe {next_val}",
+            "hex": chosen_color,
+        }
 
-    def _remove_table_rows(self):
+        self._populate_table_from_dict(classes_dict)
+        self._set_combo_to_custom()
+
+        # Foca e inicia a edição do nome da nova classe
+        for r in range(self.table_palette.rowCount()):
+            item = self.table_palette.item(r, 0)
+            if item and item.text().strip() == str(next_val):
+                self.table_palette.setCurrentCell(r, 1)
+                self.table_palette.editItem(self.table_palette.item(r, 1))
+                break
+
+    def _remove_table_rows(self) -> None:
         """Remove as linhas selecionadas na tabela."""
         selected_rows = sorted(
             set(idx.row() for idx in self.table_palette.selectedIndexes()),
@@ -778,85 +1204,236 @@ class SmartGeoTIFFDialog(QDialog):
         if confirm == QMessageBox.Yes:
             for row in selected_rows:
                 self.table_palette.removeRow(row)
+            self._set_combo_to_custom()
 
-    def _on_item_changed(self, item):
-        """Valida edição na coluna 'Valor (Pixel)': inteiro único, sem duplicata."""
-        if self._editing or item.column() != 0:
+    def _on_item_changed(self, item: QTableWidgetItem) -> None:
+        """Valida edições de valor de pixel e cores HEX com ordenação e estilização em tempo real.
+
+        Args:
+            item: O item da tabela que foi modificado pelo usuário.
+        """
+        if self._editing:
             return
-        text = item.text().strip()
-        previous = item.data(Qt.UserRole)
-        # Validar inteiro >= 0
-        try:
-            new_val = int(text)
-            if new_val < 0:
-                raise ValueError
-        except ValueError:
-            self._editing = True
-            item.setText(str(previous))
-            self._editing = False
-            QMessageBox.warning(
-                self,
-                "Valor inválido",
-                f"'{text}' não é um inteiro válido (≥ 0). Valor revertido.",
-            )
-            return
-        # Verificar duplicata
-        for r in range(self.table_palette.rowCount()):
-            if r == item.row():
-                continue
-            other = self.table_palette.item(r, 0)
-            if other and other.text().strip() == str(new_val):
+
+        col = item.column()
+        if col == 0:
+            text = item.text().strip()
+            previous = item.data(Qt.UserRole)
+            try:
+                new_val = int(text)
+                if new_val < 0:
+                    raise ValueError
+            except ValueError:
                 self._editing = True
                 item.setText(str(previous))
                 self._editing = False
                 QMessageBox.warning(
                     self,
-                    "Valor duplicado",
-                    f"O valor {new_val} já existe na linha {r + 1}. Valor revertido.",
+                    "Valor inválido",
+                    f"'{text}' não é um inteiro válido (≥ 0). Valor revertido.",
                 )
                 return
-        # Válido: atualiza referência anterior
-        item.setData(Qt.UserRole, new_val)
 
-    def _save_palette(self):
-        """Salva a paleta atual como arquivo JSON."""
+            for r in range(self.table_palette.rowCount()):
+                if r == item.row():
+                    continue
+                other = self.table_palette.item(r, 0)
+                if other and other.text().strip() == str(new_val):
+                    self._editing = True
+                    item.setText(str(previous))
+                    self._editing = False
+                    QMessageBox.warning(
+                        self,
+                        "Valor duplicado",
+                        f"O valor {new_val} já existe na linha {r + 1}. Valor revertido.",
+                    )
+                    return
+
+            item.setData(Qt.UserRole, new_val)
+            # Reordena on the fly e mantém o foco no valor editado
+            self._sort_palette_table(preserve_val=new_val)
+            self._set_combo_to_custom()
+
+        elif col == 2:
+            # Edição manual de cor HEX
+            text = item.text().strip()
+            if not text.startswith("#") and len(text) in (3, 6):
+                text = f"#{text}"
+                self._editing = True
+                item.setText(text.upper())
+                self._editing = False
+
+            if QColor(text).isValid():
+                self._apply_cell_color(item, text)
+            self._set_combo_to_custom()
+
+        elif col == 1:
+            self._set_combo_to_custom()
+
+    def _set_combo_to_custom(self) -> None:
+        """Altera a seleção do combo box de simbologia para 'Personalizado' sem repopular a tabela."""
+        self.combo_palette.blockSignals(True)
+        index = self.combo_palette.findText("Personalizado")
+        if index != -1:
+            self.combo_palette.setCurrentIndex(index)
+        self.combo_palette.blockSignals(False)
+
+    def _on_theme_changed(self, theme_name: str) -> None:
+        """Chamado quando a seleção do combo box de simbologia muda.
+
+        Args:
+            theme_name: O nome do tema selecionado (ex: 'Aptidão', 'Personalizado').
+        """
+        if theme_name != "Lista Carregada":
+            self.combo_palette.blockSignals(True)
+            index_loaded = self.combo_palette.findText("Lista Carregada")
+            if index_loaded != -1:
+                self.combo_palette.removeItem(index_loaded)
+            self.combo_palette.blockSignals(False)
+
+        if theme_name == "Personalizado":
+            self.table_palette.blockSignals(True)
+            self.table_palette.setRowCount(0)
+            self.table_palette.blockSignals(False)
+            return
+
+        if theme_name == "Lista Carregada":
+            return
+
+        self._populate_table(theme_name)
+
+    def _save_palette(self) -> None:
+        """Salva a paleta atual nos formatos Estilo QML do QGIS ou Lista JSON."""
         try:
             palette = self._get_palette_from_table()
         except Exception as e:
             QMessageBox.critical(self, "Erro ao ler tabela", str(e))
             return
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Salvar lista de classes", "", "Lista JSON (*.json)"
-        )
-        if not path:
+
+        if not palette:
+            QMessageBox.warning(
+                self, "Tabela Vazia", "Não há classes na tabela para salvar."
+            )
             return
-        if not path.lower().endswith(".json"):
-            path += ".json"
-        name = os.path.splitext(os.path.basename(path))[0]
-        data = {
-            "name": name,
-            "classes": {str(k): v for k, v in palette.items()},
-        }
+
+        path_str, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Salvar lista de classes",
+            "",
+            "Estilo QML do QGIS (*.qml);;Lista JSON (*.json)",
+        )
+        if not path_str:
+            return
+
+        path = Path(path_str)
+        ext = path.suffix.lower()
+
+        # Determina a extensão a partir da digitação ou do filtro selecionado
+        if not ext:
+            if "json" in selected_filter.lower():
+                path = path.with_suffix(".json")
+                ext = ".json"
+            else:
+                path = path.with_suffix(".qml")
+                ext = ".qml"
+
         try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            if ext == ".qml":
+                self._save_as_qml(path, palette)
+            elif ext == ".json":
+                self._save_as_json(path, palette)
+            else:
+                if "json" in selected_filter.lower():
+                    path = path.with_suffix(".json")
+                    self._save_as_json(path, palette)
+                else:
+                    path = path.with_suffix(".qml")
+                    self._save_as_qml(path, palette)
+
             QMessageBox.information(
-                self, "Lista salva", f"{len(palette)} classe(s) salvas em:\n{path}"
+                self,
+                "Lista Salva",
+                f"{len(palette)} classe(s) salvas com sucesso em:\n{path.name}",
             )
         except Exception as e:
             QMessageBox.critical(self, "Erro ao salvar", str(e))
 
-    def _load_palette(self):
+    def _save_as_qml(self, path: Path, palette: dict[int, dict[str, str]]) -> None:
+        """Gera arquivo de estilo QML paletizado para QGIS.
+
+        Args:
+            path: Caminho de destino do arquivo .qml.
+            palette: Dicionário mapeando {valor_pixel: {'name': str, 'hex': str}}.
+        """
+        palette_entries: list[str] = []
+        for val in sorted(palette.keys()):
+            info = palette[val]
+            alpha = (
+                0
+                if (
+                    self.chk_nodata.isChecked()
+                    and val == int(self.spin_nodata.value())
+                )
+                else 255
+            )
+            label = (
+                info["name"]
+                .replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace('"', "&quot;")
+                .replace("≥", "&#8805;")
+            )
+            color = info["hex"]
+            palette_entries.append(
+                f'        <paletteEntry value="{val}" color="{color}" label="{label}" alpha="{alpha}"/>'
+            )
+
+        entries_xml = "\n".join(palette_entries)
+        qml_content = f"""<!DOCTYPE qgis PUBLIC 'http://mrcc.com/qgis.dtd' 'SYSTEM'>
+<qgis version="3.22.0" styleCategories="Symbology">
+  <pipe>
+    <provider>
+      <resampling zoomedInResamplingMethod="nearest" zoomedOutResamplingMethod="nearest" maxOversampling="2"/>
+    </provider>
+    <rasterrenderer type="paletted" opacity="1" alphaBand="-1" band="1" nodataColor="">
+      <rasterTransparency/>
+      <colorPalette>
+{entries_xml}
+      </colorPalette>
+    </rasterrenderer>
+  </pipe>
+</qgis>"""
+        path.write_text(qml_content, encoding="utf-8")
+
+    def _save_as_json(self, path: Path, palette: dict[int, dict[str, str]]) -> None:
+        """Salva a paleta como arquivo JSON estruturado.
+
+        Args:
+            path: Caminho de destino do arquivo .json.
+            palette: Dicionário mapeando {valor_pixel: {'name': str, 'hex': str}}.
+        """
+        name = path.stem
+        sorted_palette = {str(k): palette[k] for k in sorted(palette.keys())}
+        data = {
+            "name": name,
+            "classes": sorted_palette,
+        }
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+    def _load_palette(self) -> None:
         """Carrega paleta a partir de arquivo JSON ou QML."""
-        path, _ = QFileDialog.getOpenFileName(
+        path_str, _ = QFileDialog.getOpenFileName(
             self,
             "Carregar lista de classes",
             "",
             "Listas (*.json *.qml);;JSON (*.json);;QML QGIS (*.qml)",
         )
-        if not path:
+        if not path_str:
             return
-        ext = os.path.splitext(path)[1].lower()
+        path = Path(path_str)
+        ext = path.suffix.lower()
         try:
             if ext == ".json":
                 classes = self._load_from_json(path)
@@ -876,44 +1453,87 @@ class SmartGeoTIFFDialog(QDialog):
             )
             return
         self._populate_table_from_dict(classes)
+
+        # Adiciona e seleciona temporariamente "Lista Carregada" no combo box
+        self.combo_palette.blockSignals(True)
+        idx_loaded = self.combo_palette.findText("Lista Carregada")
+        if idx_loaded == -1:
+            self.combo_palette.addItem("Lista Carregada")
+            idx_loaded = self.combo_palette.findText("Lista Carregada")
+        self.combo_palette.setCurrentIndex(idx_loaded)
+        self.combo_palette.blockSignals(False)
+
         QMessageBox.information(
             self,
             "Lista carregada",
-            f"{len(classes)} classe(s) carregadas de:\n{os.path.basename(path)}",
+            f"{len(classes)} classe(s) carregadas de:\n{path.name}",
         )
 
-    def _load_from_json(self, path):
-        """Retorna dict {int_val: {'name': str, 'hex': str}} a partir de JSON."""
-        with open(path, encoding="utf-8") as f:
+    def _load_from_json(self, path: Path | str) -> dict[int, dict[str, str]]:
+        """Retorna dict {int_val: {'name': str, 'hex': str}} a partir de JSON.
+
+        Args:
+            path: Caminho para o arquivo .json.
+
+        Returns:
+            Dicionário ordenado das classes carregadas.
+        """
+        p = Path(path)
+        with p.open(encoding="utf-8") as f:
             data = json.load(f)
         if "classes" not in data:
             raise ValueError("Chave 'classes' não encontrada no JSON.")
-        return {int(k): v for k, v in data["classes"].items()}
+        return dict(
+            sorted(
+                {int(k): v for k, v in data["classes"].items()}.items(),
+                key=lambda x: x[0],
+            )
+        )
 
-    def _load_from_qml(self, path):
-        """Retorna dict {int_val: {'name': str, 'hex': str}} a partir de QML QGIS."""
-        tree = ET.parse(path)
-        classes = {}
+    def _load_from_qml(self, path: Path | str) -> dict[int, dict[str, str]]:
+        """Retorna dict {int_val: {'name': str, 'hex': str}} a partir de QML QGIS.
+
+        Args:
+            path: Caminho para o arquivo .qml.
+
+        Returns:
+            Dicionário ordenado das classes carregadas.
+        """
+        p = Path(path)
+        tree = ET.parse(str(p))
+        classes: dict[int, dict[str, str]] = {}
         for entry in tree.findall(".//paletteEntry"):
             val = int(entry.get("value", 0))
             color = entry.get("color", "#CCCCCC")
             label = entry.get("label", f"Classe {val}")
             classes[val] = {"name": label, "hex": color}
-        return classes
+        return dict(sorted(classes.items(), key=lambda x: x[0]))
 
-    def _get_palette_from_table(self):
-        custom_palette = {}
+    def _get_palette_from_table(self) -> dict[int, dict[str, str]]:
+        """Lê e valida todas as classes da tabela.
+
+        Returns:
+            Dicionário ordenado {valor_pixel: {'name': str, 'hex': str}}.
+        """
+        custom_palette: dict[int, dict[str, str]] = {}
         for row in range(self.table_palette.rowCount()):
             try:
-                val = int(self.table_palette.item(row, 0).text())
-                name = self.table_palette.item(row, 1).text()
-                hex_color = self.table_palette.item(row, 2).text()
+                item_v = self.table_palette.item(row, 0)
+                item_n = self.table_palette.item(row, 1)
+                item_h = self.table_palette.item(row, 2)
+                if not item_v or not item_n or not item_h:
+                    continue
+                val = int(item_v.text().strip())
+                name = item_n.text().strip()
+                hex_color = item_h.text().strip()
                 if not hex_color.startswith("#") or len(hex_color) != 7:
-                    raise ValueError(f"Cor HEX inválida na linha {row + 1}")
+                    raise ValueError(
+                        f"Cor HEX '{hex_color}' inválida na linha {row + 1} (use formato #RRGGBB)."
+                    )
                 custom_palette[val] = {"name": name, "hex": hex_color}
             except Exception as e:
-                raise Exception(f"Erro na leitura da tabela de cores: {e}")
-        return custom_palette
+                raise Exception(f"Erro na leitura da tabela de classes: {e}")
+        return dict(sorted(custom_palette.items(), key=lambda x: x[0]))
 
     def _append_log(self, text):
         self.log_viewer.append(text)
@@ -954,15 +1574,19 @@ class SmartGeoTIFFDialog(QDialog):
             raster_max = self._detected_max
 
         self.btn_process.setEnabled(False)
+        self.btn_cancel.setEnabled(True)
         self.log_viewer.clear()
         self.progress_bar.setValue(0)
 
         nodata_value = self.spin_nodata.value() if self.chk_nodata.isChecked() else None
 
+        selected_epsg_text = self.combo_epsg.currentText().strip()
+        epsg_code = selected_epsg_text.split(" ")[0]  # Obtém apenas o código bruto "EPSG:XXXX"
+
         self.worker = GdalWorker(
             input_file,
             output_file,
-            self.combo_epsg.currentText(),
+            epsg_code,
             self.spin_threads.value(),
             custom_palette,
             nodata_value,
@@ -976,8 +1600,15 @@ class SmartGeoTIFFDialog(QDialog):
         self.worker.finished.connect(self._processing_finished)
         self.worker.start()
 
-    def _processing_finished(self, success, message):
+    def _processing_finished(self, success: bool, message: str) -> None:
+        """Chamado quando a thread GdalWorker finaliza seu processamento.
+
+        Args:
+            success: True se o processamento ocorreu sem falhas, False caso contrário.
+            message: Mensagem descritiva do status final.
+        """
         self.btn_process.setEnabled(True)
+        self.btn_cancel.setEnabled(False)
 
         if success:
             QMessageBox.information(self, "Sucesso!", message)
@@ -992,3 +1623,10 @@ class SmartGeoTIFFDialog(QDialog):
                 )
         else:
             QMessageBox.critical(self, "Erro no Processamento", message)
+
+    def _cancel_processing(self) -> None:
+        """Solicita o cancelamento da thread de processamento atual."""
+        if self.worker and self.worker.isRunning():
+            self._append_log("-> Solicitando cancelamento ao GDAL...")
+            self.worker.cancel()
+            self.btn_cancel.setEnabled(False)

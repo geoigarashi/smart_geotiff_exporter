@@ -20,11 +20,14 @@ build/
 Thumbs.db
 .DS_Store
 desktop.ini
+icon2.png
+icon3.png
 
 # Arquivos temporários
 *.tmp
 *.bak
 *.swp
+*.zip
 
 # Tooling & Caches
 .ruff_cache/
